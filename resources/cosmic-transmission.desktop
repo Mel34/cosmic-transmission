@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Transmission
+Comment=Control the Transmission daemon
+Type=Application
+Exec=cosmic-transmission
+Icon=network-server-symbolic
+Terminal=false
+NoDisplay=true
+Categories=COSMIC;
+X-CosmicApplet=true
