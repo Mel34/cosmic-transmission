@@ -65,6 +65,8 @@ pub enum Message {
     TogglePopup,
     PopupClosed(Id),
     OpenSettings,
+    SettingsHostChanged(String),
+    SettingsRpcPortChanged(String),
     SettingsOpened,
     CloseSettings(Id),
     SettingsClosed(Id),
@@ -372,6 +374,16 @@ impl cosmic::Application for AppModel {
 
             Message::SettingsOpened => {}
 
+            Message::SettingsHostChanged(host) => {
+                self.config.host = host;
+            }
+            
+            Message::SettingsRpcPortChanged(port) => {
+                if let Ok(port) = port.parse::<u16>() {
+                    self.config.rpc_port = port;
+                }
+            }
+
             Message::CloseSettings(id) => {
                 if self.settings_window == Some(id) {
                     return cosmic::iced::window::close(id);
@@ -555,37 +567,43 @@ impl AppModel {
 	        .focused_window()
 	        .map(|window_id| window_id == id)
 	        .unwrap_or_default();
-
-	    let content = widget::column::with_children([
-	        widget::text("Connection").into(),
-	        widget::divider::horizontal::default().into(),
-	        widget::row::with_children([
-	            widget::text("Host")
-	                .width(cosmic::iced::Length::Fill)
-	                .into(),
-	            widget::text(&self.config.host).into(),
-	        ])
-	        .into(),
-	        widget::row::with_children([
-	            widget::text("RPC port")
-	                .width(cosmic::iced::Length::Fill)
-	                .into(),
-	            widget::text(self.config.rpc_port.to_string()).into(),
-	        ])
-	        .into(),
-	    ])
-	    .spacing(theme::active().cosmic().spacing.space_s);
-
-	    widget::container(widget::column::with_children([
-	        cosmic::widget::header_bar()
-	            .on_close(Message::CloseSettings(id))
-	            .focused(focused)
+	
+	    let host = widget::settings::item(
+	        "Host",
+	        widget::text_input("localhost", &self.config.host)
+	            .on_input(Message::SettingsHostChanged)
+	            .width(cosmic::iced::Length::Fixed(220.0)),
+	    );
+	
+	    let rpc_port = widget::settings::item(
+	        "RPC port",
+	        widget::text_input("9091", self.config.rpc_port.to_string())
+	            .on_input(Message::SettingsRpcPortChanged)
+	            .width(cosmic::iced::Length::Fixed(120.0)),
+	    );
+	
+	    let settings = widget::settings::view_column(vec![
+	        widget::settings::section()
+	            .title("Connection")
+	            .add(host)
+	            .add(rpc_port)
 	            .into(),
-	        widget::container(content)
-	            .width(cosmic::iced::Length::Fill)
-	            .padding(theme::active().cosmic().spacing.space_l)
-	            .into(),
-	    ]))
+	    ]);
+			
+		widget::container(widget::column::with_children([
+		    cosmic::widget::header_bar()
+		        .on_close(Message::CloseSettings(id))
+		        .focused(focused)
+		        .into(),
+		    widget::container(
+		        widget::scrollable(settings)
+		            .width(cosmic::iced::Length::Fill)
+		            .height(cosmic::iced::Length::Fill),
+		    )
+		    .width(cosmic::iced::Length::Fill)
+		    .padding(theme::active().cosmic().spacing.space_l)
+		    .into(),
+		]))
 	    .class(theme::Container::WindowBackground)
 	    .width(cosmic::iced::Length::Fill)
 	    .height(cosmic::iced::Length::Fill)
