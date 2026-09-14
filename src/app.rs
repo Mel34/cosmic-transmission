@@ -1,7 +1,7 @@
 use std::process::Stdio;
 use std::time::Duration;
 
-use crate::config::ConnectionConfig;
+use crate::config::{ConnectionConfig, ServiceScope};
 use cosmic_config::CosmicConfigEntry;
 
 use cosmic::{
@@ -82,6 +82,7 @@ pub enum Message {
         state: ServiceState,
     },
     OpenWebUi,
+    SettingsServiceScopeChanged(ServiceScope),
 }
 
 pub struct AppModel {
@@ -505,6 +506,10 @@ impl cosmic::Application for AppModel {
                         .spawn();
                 });
             }
+            
+            Message::SettingsServiceScopeChanged(scope) => {
+                self.config.service_scope = scope;
+            }
         }
 
         Task::none()
@@ -583,12 +588,25 @@ impl AppModel {
 	            .on_input(Message::SettingsRpcPortChanged)
 	            .width(cosmic::iced::Length::Fixed(120.0)),
 	    );
-	
+
+		let service_scope = widget::settings::item(
+	        "Scope",
+	        cosmic::iced::widget::pick_list(
+	            [ServiceScope::User, ServiceScope::System],
+	            Some(self.config.service_scope),
+	            Message::SettingsServiceScopeChanged,
+	        )
+	        .width(cosmic::iced::Length::Fixed(120.0)),
+	    );
 	    let settings = widget::settings::view_column(vec![
 	        widget::settings::section()
 	            .title("Connection")
 	            .add(host)
 	            .add(rpc_port)
+	            .into(),
+	        widget::settings::section()
+	            .title("Service")
+	            .add(service_scope)
 	            .into(),
 	    ]);
 			
@@ -609,7 +627,7 @@ impl AppModel {
 	    .class(theme::Container::WindowBackground)
 	    .width(cosmic::iced::Length::Fill)
 	    .height(cosmic::iced::Length::Fill)
-	    .into()
+	    .into()	    
 	}
 
 	fn save_config(&self) {
