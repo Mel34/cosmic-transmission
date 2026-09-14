@@ -23,7 +23,6 @@ use tokio::process::Command;
 
 const SERVICE: &str = "transmission-daemon.service";
 const WEB_UI: &str = "http://localhost:9091";
-const RPC_URL: &str = "http://localhost:9091/transmission/rpc";
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 const STATUS_DOT_SVG: &[u8] = br#"
@@ -89,9 +88,9 @@ pub struct AppModel {
     service_enabled: bool,
     settings_window: Option<Id>,
     stats: TransmissionStats,
-    rpc_client: reqwest::Client,
-    rpc_session_id: Option<String>,
     config: ConnectionConfig,
+    rpc_client: RpcClient,
+    rpc_session_id: Option<String>,
 }
 
 impl Default for AppModel {
@@ -103,9 +102,9 @@ impl Default for AppModel {
             service_enabled: false,
             settings_window: None,
             stats: TransmissionStats::default(),
-            rpc_client: reqwest::Client::new(),
-            rpc_session_id: None,
             config: ConnectionConfig::default(),
+            rpc_client: RpcClient::new(&ConnectionConfig::default()),
+            rpc_session_id: None,
         }
     }
 }
@@ -125,45 +124,51 @@ impl cosmic::Application for AppModel {
         &mut self.core
     }
 
-    fn init(
-        core: cosmic::Core,
-        _flags: Self::Flags,
-    ) -> (
-        Self,
-        Task<cosmic::Action<Self::Message>>,
-    ) {
-        let config = cosmic::cosmic_config::Config::new(
-            Self::APP_ID,
-            ConnectionConfig::VERSION,
-        )
-        .ok()
-        .map(|config| {
-            ConnectionConfig::get_entry(&config)
-                .unwrap_or_else(|(_, config)| config)
-        })
-        .unwrap_or_default();
-        let app = Self {
-            core,
-            config,
-            ..Default::default()
-        };
+	fn init(
+	    core: cosmic::Core,
+	    _flags: Self::Flags,
+	) -> (
+	    Self,
+	    Task<cosmic::Action<Self::Message>>,
+	) {
+	    let config = cosmic::cosmic_config::Config::new(
+	        Self::APP_ID,
+	        ConnectionConfig::VERSION,
+	    )
+	    .ok()
+	    .map(|config| {
+	        ConnectionConfig::get_entry(&config)
+	            .unwrap_or_else(|(_, config)| config)
+	    })
+	    .unwrap_or_default();
 
-        let rpc_client = app.rpc_client.clone();
-        let rpc_session_id = app.rpc_session_id.clone();
+	    let rpc_client = RpcClient::new(&config);
 
-        let task = Task::perform(
-            query_transmission(rpc_client, rpc_session_id),
-            |(state, stats, rpc_session_id)| {
-                cosmic::Action::App(Message::StatusChecked {
-                    state,
-                    stats,
-                    rpc_session_id,
-                })
-            },
-        );
+	    let mut app = Self {
+	        core,
+	        config,
+	        ..Default::default()
+	    };
 
-        (app, task)
-    }
+	    app.rpc_client = rpc_client;
+
+	    let rpc_client = app.rpc_client.clone();
+	    let rpc_session_id = app.rpc_session_id.clone();
+
+	    let task = Task::perform(
+	        query_transmission(rpc_client, rpc_session_id),
+	        |(state, stats, rpc_session_id)| {
+	            cosmic::Action::App(Message::StatusChecked {
+	                state,
+	                stats,
+	                rpc_session_id,
+	            })
+	        },
+	    );
+
+	    (app, task)
+	}
+	
     fn on_close_requested(&self, id: Id) -> Option<Message> {
         Some(Message::PopupClosed(id))
     }
@@ -605,7 +610,7 @@ async fn service_action(action: &'static str) -> ServiceState {
 }
 
 async fn query_transmission(
-    client: reqwest::Client,
+    rpc_client: RpcClient,
     session_id: Option<String>,
 ) -> (
     ServiceState,
@@ -617,7 +622,7 @@ async fn query_transmission(
     match state {
         ServiceState::Running => {
             let (stats, session_id) =
-                query_stats(client, session_id).await;
+                query_stats(rpc_client, session_id).await;
 
             (ServiceState::Running, stats, session_id)
         }
@@ -636,6 +641,24 @@ async fn query_transmission(
             Some(TransmissionStats::default()),
             session_id,
         ),
+    }
+}
+
+#[derive(Clone)]
+struct RpcClient {
+    client: reqwest::Client,
+    url: String,
+}
+
+impl RpcClient {
+    fn new(config: &ConnectionConfig) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            url: format!(
+                "http://{}:{}/transmission/rpc",
+                config.host, config.rpc_port
+            ),
+        }
     }
 }
 
@@ -671,7 +694,7 @@ struct RpcRequestArguments {
 }
 
 async fn query_stats(
-    client: reqwest::Client,
+    rpc_client: RpcClient,
     session_id: Option<String>,
 ) -> (Option<TransmissionStats>, Option<String>) {
     let request = RpcRequest {
@@ -681,7 +704,8 @@ async fn query_stats(
         },
     };
 
-    let mut request_builder = client.post(RPC_URL).json(&request);
+    let mut request_builder =
+        rpc_client.client.post(&rpc_client.url).json(&request);
 
     if let Some(session_id) = session_id.as_deref() {
         request_builder = request_builder
@@ -709,8 +733,9 @@ async fn query_stats(
             return (None, None);
         };
 
-        let response = match client
-            .post(RPC_URL)
+        let response = match rpc_client
+            .client
+            .post(&rpc_client.url)
             .header("X-Transmission-Session-Id", &new_session_id)
             .json(&request)
             .send()
