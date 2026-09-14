@@ -11,7 +11,7 @@ use cosmic::{
         get_popup,
     },
     iced::window::Id,
-    iced::{Limits, Subscription},
+    iced::{event, Limits, Subscription},
     prelude::*,
     theme,
     widget,
@@ -62,6 +62,10 @@ pub struct TransmissionStats {
 pub enum Message {
     TogglePopup,
     PopupClosed(Id),
+    OpenSettings,
+    SettingsOpened,
+    CloseSettings(Id),
+    SettingsClosed(Id),
     Refresh,
     StatusChecked {
         state: ServiceState,
@@ -80,6 +84,7 @@ pub struct AppModel {
     popup: Option<Id>,
     state: ServiceState,
     service_enabled: bool,
+    settings_window: Option<Id>,
     stats: TransmissionStats,
     rpc_client: reqwest::Client,
     rpc_session_id: Option<String>,
@@ -92,6 +97,7 @@ impl Default for AppModel {
             popup: None,
             state: ServiceState::Checking,
             service_enabled: false,
+            settings_window: None,
             stats: TransmissionStats::default(),
             rpc_client: reqwest::Client::new(),
             rpc_session_id: None,
@@ -155,7 +161,11 @@ impl cosmic::Application for AppModel {
             .into()
     }
 
-    fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
+    fn view_window(&self, id: Id) -> Element<'_, Self::Message> {
+        if self.settings_window == Some(id) {
+            return self.settings_view(id);
+        }
+
         let Spacing {
             space_xxs,
             space_s,
@@ -247,20 +257,32 @@ impl cosmic::Application for AppModel {
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
-        Subscription::run(|| {
-            cosmic::iced::stream::channel(
-                1,
-                |mut sender: futures::channel::mpsc::Sender<Message>| async move {
-                    loop {
-                        tokio::time::sleep(REFRESH_INTERVAL).await;
+        Subscription::batch([
+            event::listen_with(|event, _, id| {
+                if let cosmic::iced::Event::Window(
+                    cosmic::iced::window::Event::Closed,
+                ) = event
+                {
+                    Some(Message::SettingsClosed(id))
+                } else {
+                    None
+                }
+            }),
+            Subscription::run(|| {
+                cosmic::iced::stream::channel(
+                    1,
+                    |mut sender: futures::channel::mpsc::Sender<Message>| async move {
+                        loop {
+                            tokio::time::sleep(REFRESH_INTERVAL).await;
 
-                        if sender.send(Message::Refresh).await.is_err() {
-                            break;
+                            if sender.send(Message::Refresh).await.is_err() {
+                                break;
+                            }
                         }
-                    }
-                },
-            )
-        })
+                    },
+                )
+            }),
+        ])
     }
 
     fn update(
@@ -296,6 +318,45 @@ impl cosmic::Application for AppModel {
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;
+                }
+            }
+
+            Message::OpenSettings => {
+                if self.settings_window.is_some() {
+                    return Task::none();
+                }
+
+                let (id, spawn_window) =
+                    cosmic::iced::window::open(cosmic::iced::window::Settings {
+                        position: Default::default(),
+                        exit_on_close_request: false,
+                        decorations: false,
+                        ..Default::default()
+                    });
+
+                self.settings_window = Some(id);
+
+                _ = self.set_window_title(
+                    "Transmission Settings".to_string(),
+                    id,
+                );
+
+                return spawn_window.map(|_| {
+                    cosmic::Action::App(Message::SettingsOpened)
+                });
+            }
+
+            Message::SettingsOpened => {}
+
+            Message::CloseSettings(id) => {
+                if self.settings_window == Some(id) {
+                    return cosmic::iced::window::close(id);
+                }
+            }
+
+            Message::SettingsClosed(id) => {
+                if self.settings_window == Some(id) {
+                    self.settings_window = None;
                 }
             }
 
@@ -461,6 +522,32 @@ impl AppModel {
                 .align_y(cosmic::iced::Alignment::End)
                 .into(),
         ])
+        .into()
+    }
+
+    fn settings_view(&self, id: Id) -> Element<'_, Message> {
+        let focused = self
+            .core
+            .focused_window()
+            .map(|window_id| window_id == id)
+            .unwrap_or_default();
+
+        let content = widget::container(widget::text("Settings window"))
+            .width(cosmic::iced::Length::Fill)
+            .height(cosmic::iced::Length::Fill)
+            .center_x(cosmic::iced::Length::Fill)
+            .center_y(cosmic::iced::Length::Fill);
+
+        widget::container(widget::column::with_children([
+            cosmic::widget::header_bar()
+                .on_close(Message::CloseSettings(id))
+                .focused(focused)
+                .into(),
+            content.into(),
+        ]))
+        .class(theme::Container::WindowBackground)
+        .width(cosmic::iced::Length::Fill)
+        .height(cosmic::iced::Length::Fill)
         .into()
     }
 }
