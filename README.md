@@ -2,6 +2,9 @@
 
 A small COSMIC Desktop applet for controlling a user-level [Transmission](https://transmissionbt.com/) daemon.
 
+<img width="771" height="738" alt="Cosmic Transmission Applet running" src="https://github.com/user-attachments/assets/9de84d76-db79-4aa0-9beb-b209b3f09ae1" />
+
+
 The applet provides a native COSMIC panel interface for starting and stopping Transmission, monitoring its state, viewing basic transfer statistics, and opening the Transmission Web UI.
 
 ## Why?
