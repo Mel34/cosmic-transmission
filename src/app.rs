@@ -1,16 +1,21 @@
 use std::process::Stdio;
 use std::time::Duration;
 
-use cosmic::iced::futures;
-use cosmic::iced::futures::SinkExt;
-use cosmic::iced::platform_specific::shell::wayland::commands::popup::{
-    destroy_popup,
-    get_popup,
+use cosmic::{
+    applet::{menu_button, padded_control},
+    cosmic_theme::Spacing,
+    iced::futures,
+    iced::futures::SinkExt,
+    iced::platform_specific::shell::wayland::commands::popup::{
+        destroy_popup,
+        get_popup,
+    },
+    iced::window::Id,
+    iced::{Limits, Subscription},
+    prelude::*,
+    theme,
+    widget,
 };
-use cosmic::iced::window::Id;
-use cosmic::iced::{Limits, Subscription};
-use cosmic::prelude::*;
-use cosmic::widget;
 use tokio::process::Command;
 
 const SERVICE: &str = "transmission-daemon.service";
@@ -48,8 +53,7 @@ pub enum Message {
         rpc_session_id: Option<String>,
     },
 
-    Start,
-    Stop,
+    ToggleService(bool),
 
     ServiceActionFinished {
         state: ServiceState,
@@ -62,6 +66,7 @@ pub struct AppModel {
     core: cosmic::Core,
     popup: Option<Id>,
     state: ServiceState,
+    service_enabled: bool,
     stats: TransmissionStats,
 
     rpc_client: reqwest::Client,
@@ -74,6 +79,7 @@ impl Default for AppModel {
             core: cosmic::Core::default(),
             popup: None,
             state: ServiceState::Checking,
+            service_enabled: false,
             stats: TransmissionStats::default(),
             rpc_client: reqwest::Client::new(),
             rpc_session_id: None,
@@ -138,145 +144,106 @@ impl cosmic::Application for AppModel {
     }
 
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
-        let status = match self.state {
-            ServiceState::Checking => {
-                widget::row::with_children([
-                    widget::text("…").into(),
-                    widget::text("Checking…").into(),
-                ])
-                .spacing(6)
-            }
+        let Spacing {
+            space_xxs,
+            space_s,
+            ..
+        } = theme::active().cosmic().spacing;
 
-            ServiceState::Running => {
-                widget::row::with_children([
-                    widget::text("●").into(),
-                    widget::text("Running").into(),
-                ])
-                .spacing(6)
-            }
+        let service_toggle = widget::toggler(self.service_enabled)
+            .label(Some("Transmission".to_string()))
+            .width(cosmic::iced::Length::Fill)
+            .text_size(14);
 
-            ServiceState::Stopped => {
-                widget::row::with_children([
-                    widget::text("○").into(),
-                    widget::text("Stopped").into(),
-                ])
-                .spacing(6)
-            }
-
-            ServiceState::Error => {
-                widget::row::with_children([
-                    widget::text("?").into(),
-                    widget::text("Unable to determine state").into(),
-                ])
-                .spacing(6)
-            }
-        };
-
-        let stats = match self.state {
-            ServiceState::Running => {
-                widget::column::with_children([
-                    widget::column::with_children([
-                        widget::text(format!(
-                            "{} active",
-                            self.stats.active
-                        ))
-                        .into(),
-
-                        widget::text(format!(
-                            "{} downloading",
-                            self.stats.downloading
-                        ))
-                        .into(),
-
-                        widget::text(format!(
-                            "{} seeding",
-                            self.stats.seeding
-                        ))
-                        .into(),
-                    ])
-                    .spacing(4)
-                    .into(),
-
-                    widget::row::with_children([
-                        widget::text(format!(
-                            "↓ {} /s",
-                            format_speed(self.stats.download_speed)
-                        ))
-                        .into(),
-
-                        widget::text(format!(
-                            "↑ {} /s",
-                            format_speed(self.stats.upload_speed)
-                        ))
-                        .into(),
-                    ])
-                    .spacing(16)
-                    .into(),
-                ])
-                .spacing(8)
-            }
-
-            ServiceState::Checking => {
-                widget::column::with_children([
-                    widget::text("Checking Transmission status…").into(),
-                ])
-            }
-
-            ServiceState::Stopped => {
-                widget::column::with_children([
-                    widget::text("Transmission is not running").into(),
-                ])
-            }
-
-            ServiceState::Error => {
-                widget::column::with_children([
-                    widget::text("Unable to determine daemon state").into(),
-                ])
-            }
-        };
-
-        let action_button = match self.state {
-            ServiceState::Running => {
-                widget::button::standard("Stop")
-                    .on_press(Message::Stop)
-            }
-
-            ServiceState::Stopped => {
-                widget::button::suggested("Start")
-                    .on_press(Message::Start)
+        let service_toggle = match self.state {
+            ServiceState::Running | ServiceState::Stopped => {
+                service_toggle.on_toggle(Message::ToggleService)
             }
 
             ServiceState::Checking | ServiceState::Error => {
-                widget::button::standard("Start")
+                service_toggle
             }
         };
 
-        let web_button = match self.state {
+        let stats = widget::column::with_children([
+            widget::text(format!(
+                "↓ {}",
+                format_speed(self.stats.download_speed)
+            ))
+            .into(),
+
+            widget::text(format!(
+                "↑ {}",
+                format_speed(self.stats.upload_speed)
+            ))
+            .into(),
+        ])
+        .spacing(space_xxs);
+
+        let counts = widget::column::with_children([
+            widget::row::with_children([
+                widget::text("Downloading")
+                    .width(cosmic::iced::Length::Fill)
+                    .into(),
+
+                widget::text(self.stats.downloading.to_string()).into(),
+            ])
+            .into(),
+
+            widget::row::with_children([
+                widget::text("Seeding")
+                    .width(cosmic::iced::Length::Fill)
+                    .into(),
+
+                widget::text(self.stats.seeding.to_string()).into(),
+            ])
+            .into(),
+
+            widget::row::with_children([
+                widget::text("Active")
+                    .width(cosmic::iced::Length::Fill)
+                    .into(),
+
+                widget::text(self.stats.active.to_string()).into(),
+            ])
+            .into(),
+        ])
+        .spacing(space_xxs);
+
+        let web_ui = match self.state {
             ServiceState::Running => {
-                widget::button::standard("Open Web UI")
+                menu_button(widget::text("Open Web UI"))
                     .on_press(Message::OpenWebUi)
             }
 
             ServiceState::Checking
             | ServiceState::Stopped
             | ServiceState::Error => {
-                widget::button::standard("Open Web UI")
+                menu_button(widget::text("Open Web UI"))
             }
         };
 
-        let actions = widget::row::with_children([
-            action_button.into(),
-            web_button.into(),
-        ])
-        .spacing(8);
-
         let content = widget::column::with_children([
-            widget::text("Transmission").into(),
-            status.into(),
-            stats.into(),
-            actions.into(),
-        ])
-        .spacing(12);
+            padded_control(service_toggle).into(),
+
+            padded_control(widget::divider::horizontal::default())
+                .padding([space_xxs, space_s])
+                .into(),
+
+            padded_control(stats).into(),
+
+            padded_control(widget::divider::horizontal::default())
+                .padding([space_xxs, space_s])
+                .into(),
+
+            padded_control(counts).into(),
+
+            padded_control(widget::divider::horizontal::default())
+                .padding([space_xxs, space_s])
+                .into(),
+
+            web_ui.into(),
+        ]);
 
         self.core.applet.popup_container(content).into()
     }
@@ -357,6 +324,18 @@ impl cosmic::Application for AppModel {
             } => {
                 self.state = state;
 
+                match state {
+                    ServiceState::Running => {
+                        self.service_enabled = true;
+                    }
+
+                    ServiceState::Stopped => {
+                        self.service_enabled = false;
+                    }
+
+                    ServiceState::Checking | ServiceState::Error => {}
+                }
+
                 if let Some(stats) = stats {
                     self.stats = stats;
                 }
@@ -371,20 +350,18 @@ impl cosmic::Application for AppModel {
                 }
             }
 
-            Message::Start => {
-                return Task::perform(
-                    service_action("start"),
-                    |state| {
-                        cosmic::Action::App(
-                            Message::ServiceActionFinished { state },
-                        )
-                    },
-                );
-            }
+            Message::ToggleService(enabled) => {
+                self.service_enabled = enabled;
+                self.state = ServiceState::Checking;
 
-            Message::Stop => {
+                let action = if enabled {
+                    "start"
+                } else {
+                    "stop"
+                };
+
                 return Task::perform(
-                    service_action("stop"),
+                    service_action(action),
                     |state| {
                         cosmic::Action::App(
                             Message::ServiceActionFinished { state },
@@ -398,6 +375,8 @@ impl cosmic::Application for AppModel {
 
                 match state {
                     ServiceState::Running => {
+                        self.service_enabled = true;
+
                         let rpc_client = self.rpc_client.clone();
                         let rpc_session_id = self.rpc_session_id.clone();
 
@@ -415,12 +394,18 @@ impl cosmic::Application for AppModel {
                         );
                     }
 
-                    ServiceState::Stopped | ServiceState::Error => {
+                    ServiceState::Stopped => {
+                        self.service_enabled = false;
+                        self.stats = TransmissionStats::default();
+                    }
+
+                    ServiceState::Error => {
                         self.stats = TransmissionStats::default();
                     }
 
                     ServiceState::Checking => {
-                        // Retain existing stats while the service transitions.
+                        // Retain the optimistic toggle state while
+                        // the service is transitioning.
                     }
                 }
             }
@@ -725,17 +710,17 @@ async fn parse_rpc_response(
 }
 
 fn format_speed(bytes_per_second: u64) -> String {
-    if bytes_per_second >= 1_000_000 {
+    if bytes_per_second >= 1024 * 1024 {
         format!(
-            "{:.1} MB",
-            bytes_per_second as f64 / 1_000_000.0
+            "{:.1} MiB/s",
+            bytes_per_second as f64 / (1024.0 * 1024.0)
         )
-    } else if bytes_per_second >= 1_000 {
+    } else if bytes_per_second >= 1024 {
         format!(
-            "{:.1} KB",
-            bytes_per_second as f64 / 1_000.0
+            "{:.0} KiB/s",
+            bytes_per_second as f64 / 1024.0
         )
     } else {
-        format!("{} B", bytes_per_second)
+        format!("{} B/s", bytes_per_second)
     }
 }
