@@ -23,6 +23,24 @@ const WEB_UI: &str = "http://localhost:9091";
 const RPC_URL: &str = "http://localhost:9091/transmission/rpc";
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
+const STATUS_DOT_SVG: &[u8] = br#"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8">
+  <circle cx="4" cy="4" r="4" fill="currentColor"/>
+</svg>
+"#;
+
+const STATUS_ERROR_SVG: &[u8] = br#"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8">
+  <path
+    d="M1.5 1.5l5 5M6.5 1.5l-5 5"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.5"
+    stroke-linecap="round"
+  />
+</svg>
+"#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState {
     Checking,
@@ -44,21 +62,16 @@ pub struct TransmissionStats {
 pub enum Message {
     TogglePopup,
     PopupClosed(Id),
-
     Refresh,
-
     StatusChecked {
         state: ServiceState,
         stats: Option<TransmissionStats>,
         rpc_session_id: Option<String>,
     },
-
     ToggleService(bool),
-
     ServiceActionFinished {
         state: ServiceState,
     },
-
     OpenWebUi,
 }
 
@@ -68,7 +81,6 @@ pub struct AppModel {
     state: ServiceState,
     service_enabled: bool,
     stats: TransmissionStats,
-
     rpc_client: reqwest::Client,
     rpc_session_id: Option<String>,
 }
@@ -138,7 +150,7 @@ impl cosmic::Application for AppModel {
     fn view(&self) -> Element<'_, Self::Message> {
         self.core
             .applet
-            .icon_button(self.panel_icon())
+            .button_from_element(self.panel_icon(), false)
             .on_press(Message::TogglePopup)
             .into()
     }
@@ -159,7 +171,6 @@ impl cosmic::Application for AppModel {
             ServiceState::Running | ServiceState::Stopped => {
                 service_toggle.on_toggle(Message::ToggleService)
             }
-
             ServiceState::Checking | ServiceState::Error => {
                 service_toggle
             }
@@ -171,7 +182,6 @@ impl cosmic::Application for AppModel {
                 format_speed(self.stats.download_speed)
             ))
             .into(),
-
             widget::text(format!(
                 "↑ {}",
                 format_speed(self.stats.upload_speed)
@@ -185,25 +195,20 @@ impl cosmic::Application for AppModel {
                 widget::text("Downloading")
                     .width(cosmic::iced::Length::Fill)
                     .into(),
-
                 widget::text(self.stats.downloading.to_string()).into(),
             ])
             .into(),
-
             widget::row::with_children([
                 widget::text("Seeding")
                     .width(cosmic::iced::Length::Fill)
                     .into(),
-
                 widget::text(self.stats.seeding.to_string()).into(),
             ])
             .into(),
-
             widget::row::with_children([
                 widget::text("Active")
                     .width(cosmic::iced::Length::Fill)
                     .into(),
-
                 widget::text(self.stats.active.to_string()).into(),
             ])
             .into(),
@@ -215,7 +220,6 @@ impl cosmic::Application for AppModel {
                 menu_button(widget::text("Open Web UI"))
                     .on_press(Message::OpenWebUi)
             }
-
             ServiceState::Checking
             | ServiceState::Stopped
             | ServiceState::Error => {
@@ -225,23 +229,17 @@ impl cosmic::Application for AppModel {
 
         let content = widget::column::with_children([
             padded_control(service_toggle).into(),
-
             padded_control(widget::divider::horizontal::default())
                 .padding([space_xxs, space_s])
                 .into(),
-
             padded_control(stats).into(),
-
             padded_control(widget::divider::horizontal::default())
                 .padding([space_xxs, space_s])
                 .into(),
-
             padded_control(counts).into(),
-
             padded_control(widget::divider::horizontal::default())
                 .padding([space_xxs, space_s])
                 .into(),
-
             web_ui.into(),
         ]);
 
@@ -328,11 +326,9 @@ impl cosmic::Application for AppModel {
                     ServiceState::Running => {
                         self.service_enabled = true;
                     }
-
                     ServiceState::Stopped => {
                         self.service_enabled = false;
                     }
-
                     ServiceState::Checking | ServiceState::Error => {}
                 }
 
@@ -354,11 +350,7 @@ impl cosmic::Application for AppModel {
                 self.service_enabled = enabled;
                 self.state = ServiceState::Checking;
 
-                let action = if enabled {
-                    "start"
-                } else {
-                    "stop"
-                };
+                let action = if enabled { "start" } else { "stop" };
 
                 return Task::perform(
                     service_action(action),
@@ -393,20 +385,14 @@ impl cosmic::Application for AppModel {
                             },
                         );
                     }
-
                     ServiceState::Stopped => {
                         self.service_enabled = false;
                         self.stats = TransmissionStats::default();
                     }
-
                     ServiceState::Error => {
                         self.stats = TransmissionStats::default();
                     }
-
-                    ServiceState::Checking => {
-                        // Retain the optimistic toggle state while
-                        // the service is transitioning.
-                    }
+                    ServiceState::Checking => {}
                 }
             }
 
@@ -431,23 +417,57 @@ impl cosmic::Application for AppModel {
 }
 
 impl AppModel {
-    fn panel_icon(&self) -> &'static str {
-        match self.state {
-            ServiceState::Checking => "network-server-symbolic",
-            ServiceState::Running => "network-receive-symbolic",
-            ServiceState::Stopped => "network-disconnected-symbolic",
-            ServiceState::Error => "network-error-symbolic",
-        }
+    fn panel_icon(&self) -> Element<'_, Message> {
+        let transmission = widget::icon::from_name("transmission")
+            .symbolic(false)
+            .size(16);
+
+        let (status_svg, status_color) = match self.state {
+            ServiceState::Running => (
+                STATUS_DOT_SVG,
+                theme::active().cosmic().success_color(),
+            ),
+            ServiceState::Checking => (
+                STATUS_DOT_SVG,
+                theme::active().cosmic().warning_color(),
+            ),
+            ServiceState::Stopped => (
+                STATUS_DOT_SVG,
+                theme::active().cosmic().destructive_color(),
+            ),
+            ServiceState::Error => (
+                STATUS_ERROR_SVG,
+                theme::active().cosmic().destructive_color(),
+            ),
+        };
+
+        let status_handle =
+            widget::icon::from_svg_bytes(status_svg).symbolic(true);
+
+        let status = widget::icon(status_handle)
+            .size(10)
+            .class(theme::Svg::custom(move |_| {
+                cosmic::iced::widget::svg::Style {
+                    color: Some(status_color.into()),
+                }
+            }));
+
+        cosmic::iced::widget::stack([
+            transmission.into(),
+            widget::container(status)
+                .width(cosmic::iced::Length::Fill)
+                .height(cosmic::iced::Length::Fill)
+                .align_x(cosmic::iced::Alignment::End)
+                .align_y(cosmic::iced::Alignment::End)
+                .into(),
+        ])
+        .into()
     }
 }
 
 async fn service_status() -> ServiceState {
     let output = Command::new("systemctl")
-        .args([
-            "--user",
-            "is-active",
-            SERVICE,
-        ])
+        .args(["--user", "is-active", SERVICE])
         .output()
         .await;
 
@@ -459,7 +479,6 @@ async fn service_status() -> ServiceState {
                 _ => ServiceState::Error,
             }
         }
-
         Ok(output) => {
             match String::from_utf8_lossy(&output.stdout).trim() {
                 "inactive" | "failed" => ServiceState::Stopped,
@@ -467,26 +486,18 @@ async fn service_status() -> ServiceState {
                 _ => ServiceState::Error,
             }
         }
-
         Err(_) => ServiceState::Error,
     }
 }
 
 async fn service_action(action: &'static str) -> ServiceState {
     let result = Command::new("systemctl")
-        .args([
-            "--user",
-            action,
-            SERVICE,
-        ])
+        .args(["--user", action, SERVICE])
         .status()
         .await;
 
     match result {
-        Ok(status) if status.success() => {
-            service_status().await
-        }
-
+        Ok(status) if status.success() => service_status().await,
         _ => ServiceState::Error,
     }
 }
@@ -508,30 +519,21 @@ async fn query_transmission(
 
             (ServiceState::Running, stats, session_id)
         }
-
-        ServiceState::Stopped => {
-            (
-                ServiceState::Stopped,
-                Some(TransmissionStats::default()),
-                session_id,
-            )
-        }
-
-        ServiceState::Checking => {
-            (
-                ServiceState::Checking,
-                None,
-                session_id,
-            )
-        }
-
-        ServiceState::Error => {
-            (
-                ServiceState::Error,
-                Some(TransmissionStats::default()),
-                session_id,
-            )
-        }
+        ServiceState::Stopped => (
+            ServiceState::Stopped,
+            Some(TransmissionStats::default()),
+            session_id,
+        ),
+        ServiceState::Checking => (
+            ServiceState::Checking,
+            None,
+            session_id,
+        ),
+        ServiceState::Error => (
+            ServiceState::Error,
+            Some(TransmissionStats::default()),
+            session_id,
+        ),
     }
 }
 
@@ -549,10 +551,8 @@ struct RpcArguments {
 #[derive(Debug, serde::Deserialize)]
 struct RpcTorrent {
     status: u8,
-
     #[serde(rename = "rateDownload")]
     rate_download: u64,
-
     #[serde(rename = "rateUpload")]
     rate_upload: u64,
 }
@@ -575,44 +575,25 @@ async fn query_stats(
     let request = RpcRequest {
         method: "torrent-get",
         arguments: RpcRequestArguments {
-            fields: [
-                "status",
-                "rateDownload",
-                "rateUpload",
-            ],
+            fields: ["status", "rateDownload", "rateUpload"],
         },
     };
 
-    let mut request_builder = client
-        .post(RPC_URL)
-        .json(&request);
+    let mut request_builder = client.post(RPC_URL).json(&request);
 
     if let Some(session_id) = session_id.as_deref() {
         request_builder = request_builder
-            .header(
-                "X-Transmission-Session-Id",
-                session_id,
-            );
+            .header("X-Transmission-Session-Id", session_id);
     }
 
     let response = match request_builder.send().await {
         Ok(response) => response,
-
-        Err(_) => {
-            return (
-                None,
-                session_id,
-            );
-        }
+        Err(_) => return (None, session_id),
     };
 
     if response.status().is_success() {
         let stats = parse_rpc_response(response).await;
-
-        return (
-            Some(stats),
-            session_id,
-        );
+        return (Some(stats), session_id);
     }
 
     if response.status() == reqwest::StatusCode::CONFLICT {
@@ -623,44 +604,25 @@ async fn query_stats(
             .map(str::to_owned);
 
         let Some(new_session_id) = new_session_id else {
-            return (
-                None,
-                None,
-            );
+            return (None, None);
         };
 
         let response = match client
             .post(RPC_URL)
-            .header(
-                "X-Transmission-Session-Id",
-                &new_session_id,
-            )
+            .header("X-Transmission-Session-Id", &new_session_id)
             .json(&request)
             .send()
             .await
         {
             Ok(response) => response,
-
-            Err(_) => {
-                return (
-                    None,
-                    Some(new_session_id),
-                );
-            }
+            Err(_) => return (None, Some(new_session_id)),
         };
 
         let stats = parse_rpc_response(response).await;
-
-        return (
-            Some(stats),
-            Some(new_session_id),
-        );
+        return (Some(stats), Some(new_session_id));
     }
 
-    (
-        None,
-        session_id,
-    )
+    (None, session_id)
 }
 
 async fn parse_rpc_response(
@@ -668,25 +630,16 @@ async fn parse_rpc_response(
 ) -> TransmissionStats {
     let response: RpcResponse = match response.json().await {
         Ok(response) => response,
-
-        Err(_) => {
-            return TransmissionStats::default();
-        }
+        Err(_) => return TransmissionStats::default(),
     };
 
     if response.result != "success" {
         return TransmissionStats::default();
     }
 
-    let torrents = match response
-        .arguments
-        .and_then(|args| args.torrents)
-    {
+    let torrents = match response.arguments.and_then(|args| args.torrents) {
         Some(torrents) => torrents,
-
-        None => {
-            return TransmissionStats::default();
-        }
+        None => return TransmissionStats::default(),
     };
 
     let mut stats = TransmissionStats::default();
