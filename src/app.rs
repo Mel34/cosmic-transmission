@@ -245,17 +245,20 @@ impl cosmic::Application for AppModel {
         ])
         .spacing(space_xxs);
 
-        let web_ui = match self.state {
-            ServiceState::Running => {
-                menu_button(widget::text("Open Web UI"))
-                    .on_press(Message::OpenWebUi)
-            }
-            ServiceState::Checking
-            | ServiceState::Stopped
-            | ServiceState::Error => {
-                menu_button(widget::text("Open Web UI"))
-            }
-        };
+		let web_ui = match self.state {
+		    ServiceState::Running => {
+		        menu_button(widget::text("Open Web UI"))
+		            .on_press(Message::OpenWebUi)
+		    }
+		    ServiceState::Checking
+		    | ServiceState::Stopped
+		    | ServiceState::Error => {
+		        menu_button(widget::text("Open Web UI"))
+		    }
+		};
+
+		let settings = menu_button(widget::text("Settings"))
+		    .on_press(Message::OpenSettings);
 
         let content = widget::column::with_children([
             padded_control(service_toggle).into(),
@@ -271,6 +274,7 @@ impl cosmic::Application for AppModel {
                 .padding([space_xxs, space_s])
                 .into(),
             web_ui.into(),
+            settings.into(),
         ]);
 
         self.core.applet.popup_container(content).into()
