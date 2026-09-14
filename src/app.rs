@@ -2,6 +2,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use crate::config::{ConnectionConfig, ServiceScope};
+use crate::service::{ServiceController, ServiceState};
 use cosmic_config::CosmicConfigEntry;
 
 use cosmic::{
@@ -22,7 +23,6 @@ use cosmic::{
 use cosmic::Application;
 use tokio::process::Command;
 
-const SERVICE: &str = "transmission-daemon.service";
 const WEB_UI: &str = "http://localhost:9091";
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -43,14 +43,6 @@ const STATUS_ERROR_SVG: &[u8] = br#"
   />
 </svg>
 "#;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceState {
-    Checking,
-    Running,
-    Stopped,
-    Error,
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct TransmissionStats {
@@ -160,7 +152,11 @@ impl cosmic::Application for AppModel {
 	    let rpc_session_id = app.rpc_session_id.clone();
 
 	    let task = Task::perform(
-	        query_transmission(rpc_client, rpc_session_id),
+	        query_transmission(
+	            rpc_client,
+	            rpc_session_id,
+	            app.config.service_scope,
+	        ),
 	        |(state, stats, rpc_session_id)| {
 	            cosmic::Action::App(Message::StatusChecked {
 	                state,
@@ -404,7 +400,11 @@ impl cosmic::Application for AppModel {
                 let rpc_session_id = self.rpc_session_id.clone();
 
                 return Task::perform(
-                    query_transmission(rpc_client, rpc_session_id),
+                    query_transmission(
+                        rpc_client,
+                        rpc_session_id,
+                        self.config.service_scope,
+                    ),
                     |(state, stats, rpc_session_id)| {
                         cosmic::Action::App(Message::StatusChecked {
                             state,
@@ -452,8 +452,10 @@ impl cosmic::Application for AppModel {
 
                 let action = if enabled { "start" } else { "stop" };
 
+                let service = ServiceController::new(self.config.service_scope);
+                
                 return Task::perform(
-                    service_action(action),
+                    service.action(action),
                     |state| {
                         cosmic::Action::App(
                             Message::ServiceActionFinished { state },
@@ -643,52 +645,17 @@ impl AppModel {
 
 }
 
-async fn service_status() -> ServiceState {
-    let output = Command::new("systemctl")
-        .args(["--user", "is-active", SERVICE])
-        .output()
-        .await;
-
-    match output {
-        Ok(output) if output.status.success() => {
-            match String::from_utf8_lossy(&output.stdout).trim() {
-                "active" => ServiceState::Running,
-                "activating" | "deactivating" => ServiceState::Checking,
-                _ => ServiceState::Error,
-            }
-        }
-        Ok(output) => {
-            match String::from_utf8_lossy(&output.stdout).trim() {
-                "inactive" | "failed" => ServiceState::Stopped,
-                "activating" | "deactivating" => ServiceState::Checking,
-                _ => ServiceState::Error,
-            }
-        }
-        Err(_) => ServiceState::Error,
-    }
-}
-
-async fn service_action(action: &'static str) -> ServiceState {
-    let result = Command::new("systemctl")
-        .args(["--user", action, SERVICE])
-        .status()
-        .await;
-
-    match result {
-        Ok(status) if status.success() => service_status().await,
-        _ => ServiceState::Error,
-    }
-}
-
 async fn query_transmission(
     rpc_client: RpcClient,
     session_id: Option<String>,
+    service_scope: ServiceScope,
 ) -> (
     ServiceState,
     Option<TransmissionStats>,
     Option<String>,
 ) {
-    let state = service_status().await;
+    let service = ServiceController::new(service_scope);
+    let state = service.status().await;
 
     match state {
         ServiceState::Running => {
