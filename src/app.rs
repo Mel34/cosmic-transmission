@@ -19,6 +19,7 @@ use cosmic::{
     theme,
     widget,
 };
+use cosmic::Application;
 use tokio::process::Command;
 
 const SERVICE: &str = "transmission-daemon.service";
@@ -392,6 +393,7 @@ impl cosmic::Application for AppModel {
 
             Message::SettingsClosed(id) => {
                 if self.settings_window == Some(id) {
+                    self.save_config();
                     self.settings_window = None;
                 }
             }
@@ -609,6 +611,18 @@ impl AppModel {
 	    .height(cosmic::iced::Length::Fill)
 	    .into()
 	}
+
+	fn save_config(&self) {
+	    let Ok(config) = cosmic::cosmic_config::Config::new(
+	        Self::APP_ID,
+	        ConnectionConfig::VERSION,
+	    ) else {
+	        return;
+	    };
+	
+	    let _ = self.config.write_entry(&config);
+	}
+
 }
 
 async fn service_status() -> ServiceState {
