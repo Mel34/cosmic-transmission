@@ -549,31 +549,48 @@ impl AppModel {
         .into()
     }
 
-    fn settings_view(&self, id: Id) -> Element<'_, Message> {
-        let focused = self
-            .core
-            .focused_window()
-            .map(|window_id| window_id == id)
-            .unwrap_or_default();
+	fn settings_view(&self, id: Id) -> Element<'_, Message> {
+	    let focused = self
+	        .core
+	        .focused_window()
+	        .map(|window_id| window_id == id)
+	        .unwrap_or_default();
 
-        let content = widget::container(widget::text("Settings window"))
-            .width(cosmic::iced::Length::Fill)
-            .height(cosmic::iced::Length::Fill)
-            .center_x(cosmic::iced::Length::Fill)
-            .center_y(cosmic::iced::Length::Fill);
+	    let content = widget::column::with_children([
+	        widget::text("Connection").into(),
+	        widget::divider::horizontal::default().into(),
+	        widget::row::with_children([
+	            widget::text("Host")
+	                .width(cosmic::iced::Length::Fill)
+	                .into(),
+	            widget::text(&self.config.host).into(),
+	        ])
+	        .into(),
+	        widget::row::with_children([
+	            widget::text("RPC port")
+	                .width(cosmic::iced::Length::Fill)
+	                .into(),
+	            widget::text(self.config.rpc_port.to_string()).into(),
+	        ])
+	        .into(),
+	    ])
+	    .spacing(theme::active().cosmic().spacing.space_s);
 
-        widget::container(widget::column::with_children([
-            cosmic::widget::header_bar()
-                .on_close(Message::CloseSettings(id))
-                .focused(focused)
-                .into(),
-            content.into(),
-        ]))
-        .class(theme::Container::WindowBackground)
-        .width(cosmic::iced::Length::Fill)
-        .height(cosmic::iced::Length::Fill)
-        .into()
-    }
+	    widget::container(widget::column::with_children([
+	        cosmic::widget::header_bar()
+	            .on_close(Message::CloseSettings(id))
+	            .focused(focused)
+	            .into(),
+	        widget::container(content)
+	            .width(cosmic::iced::Length::Fill)
+	            .padding(theme::active().cosmic().spacing.space_l)
+	            .into(),
+	    ]))
+	    .class(theme::Container::WindowBackground)
+	    .width(cosmic::iced::Length::Fill)
+	    .height(cosmic::iced::Length::Fill)
+	    .into()
+	}
 }
 
 async fn service_status() -> ServiceState {
