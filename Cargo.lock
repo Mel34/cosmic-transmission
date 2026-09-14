@@ -1054,6 +1054,7 @@ dependencies = [
 name = "cosmic-transmission"
 version = "0.2.0"
 dependencies = [
+ "cosmic-config",
  "libcosmic",
  "reqwest",
  "serde",

@@ -9,6 +9,7 @@ description = "COSMIC applet for controlling Transmission"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["process", "time"] }
+cosmic-config = { git = "https://github.com/pop-os/libcosmic.git", package = "cosmic-config", features = ["dbus", "tokio"] }
 
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic.git"

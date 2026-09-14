@@ -1,6 +1,9 @@
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::config::ConnectionConfig;
+use cosmic_config::CosmicConfigEntry;
+
 use cosmic::{
     applet::{menu_button, padded_control},
     cosmic_theme::Spacing,
@@ -88,6 +91,7 @@ pub struct AppModel {
     stats: TransmissionStats,
     rpc_client: reqwest::Client,
     rpc_session_id: Option<String>,
+    config: ConnectionConfig,
 }
 
 impl Default for AppModel {
@@ -101,6 +105,7 @@ impl Default for AppModel {
             stats: TransmissionStats::default(),
             rpc_client: reqwest::Client::new(),
             rpc_session_id: None,
+            config: ConnectionConfig::default(),
         }
     }
 }
@@ -127,8 +132,19 @@ impl cosmic::Application for AppModel {
         Self,
         Task<cosmic::Action<Self::Message>>,
     ) {
+        let config = cosmic::cosmic_config::Config::new(
+            Self::APP_ID,
+            ConnectionConfig::VERSION,
+        )
+        .ok()
+        .map(|config| {
+            ConnectionConfig::get_entry(&config)
+                .unwrap_or_else(|(_, config)| config)
+        })
+        .unwrap_or_default();
         let app = Self {
             core,
+            config,
             ..Default::default()
         };
 
@@ -148,7 +164,6 @@ impl cosmic::Application for AppModel {
 
         (app, task)
     }
-
     fn on_close_requested(&self, id: Id) -> Option<Message> {
         Some(Message::PopupClosed(id))
     }
