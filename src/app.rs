@@ -185,13 +185,17 @@ impl cosmic::Application for AppModel {
         if self.settings_window == Some(id) {
             return self.settings_view(id);
         }
-
+    
+        if self.popup != Some(id) {
+            return widget::column::with_children([]).into();
+        }
+    
         let Spacing {
             space_xxs,
             space_s,
             ..
         } = theme::active().cosmic().spacing;
-
+        
         let service_toggle = widget::toggler(self.service_enabled)
             .label(Some("Transmission".to_string()))
             .width(cosmic::iced::Length::Fill)
