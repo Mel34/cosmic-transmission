@@ -254,11 +254,14 @@ impl cosmic::Application for AppModel {
 		        menu_button(widget::text("Open Web UI"))
 		            .on_press(Message::OpenWebUi)
 		    }
-		    ServiceState::Checking
-		    | ServiceState::Stopped
-		    | ServiceState::Error => {
-		        menu_button(widget::text("Open Web UI"))
-		    }
+		   ServiceState::Checking
+		   | ServiceState::Stopped
+		   | ServiceState::Error => {
+		       widget::button::custom(widget::text("Open Web UI"))
+		           .padding(cosmic::applet::menu_control_padding())
+		           .width(cosmic::iced::Length::Fill)
+		           .class(theme::Button::MenuItem)
+		   }
 		};
 
 		let settings = menu_button(widget::text("Settings"))
