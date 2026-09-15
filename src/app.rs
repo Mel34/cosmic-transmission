@@ -1,8 +1,8 @@
 use std::process::Stdio;
 use std::time::Duration;
 
-use crate::config::{ConnectionConfig, ServiceScope};
-use crate::service::{ServiceController, ServiceState};
+use cosmic_transmission::config::{ConnectionConfig, ServiceScope};
+use cosmic_transmission::service::{ServiceController, ServiceState};
 use cosmic_config::CosmicConfigEntry;
 
 use cosmic::{
@@ -15,12 +15,21 @@ use cosmic::{
         get_popup,
     },
     iced::window::Id,
-    iced::{event, Limits, Subscription},
+    iced::{Limits, Subscription},
     prelude::*,
     theme,
     widget,
 };
-use cosmic::Application;
+
+use cosmic::{
+    applet::token::subscription::{
+        activation_token_subscription,
+        TokenRequest,
+        TokenUpdate,
+    },
+    cctk::sctk::reexports::calloop,
+};
+
 use tokio::process::Command;
 
 const WEB_UI: &str = "http://localhost:9091";
@@ -56,13 +65,9 @@ pub struct TransmissionStats {
 #[derive(Debug, Clone)]
 pub enum Message {
     TogglePopup,
+    Token(TokenUpdate),
     PopupClosed(Id),
     OpenSettings,
-    SettingsHostChanged(String),
-    SettingsRpcPortChanged(String),
-    SettingsOpened,
-    CloseSettings(Id),
-    SettingsClosed(Id),
     Refresh,
     StatusChecked {
         state: ServiceState,
@@ -74,7 +79,6 @@ pub enum Message {
         state: ServiceState,
     },
     OpenWebUi,
-    SettingsServiceScopeChanged(ServiceScope),
 }
 
 pub struct AppModel {
@@ -82,11 +86,11 @@ pub struct AppModel {
     popup: Option<Id>,
     state: ServiceState,
     service_enabled: bool,
-    settings_window: Option<Id>,
     stats: TransmissionStats,
     config: ConnectionConfig,
     rpc_client: RpcClient,
     rpc_session_id: Option<String>,
+    token_tx: Option<calloop::channel::Sender<TokenRequest>>,
 }
 
 impl Default for AppModel {
@@ -96,11 +100,11 @@ impl Default for AppModel {
             popup: None,
             state: ServiceState::Checking,
             service_enabled: false,
-            settings_window: None,
             stats: TransmissionStats::default(),
             config: ConnectionConfig::default(),
             rpc_client: RpcClient::new(&ConnectionConfig::default()),
             rpc_session_id: None,
+            token_tx: None,
         }
     }
 }
@@ -168,7 +172,7 @@ impl cosmic::Application for AppModel {
 
 	    (app, task)
 	}
-	
+
     fn on_close_requested(&self, id: Id) -> Option<Message> {
         Some(Message::PopupClosed(id))
     }
@@ -182,20 +186,16 @@ impl cosmic::Application for AppModel {
     }
 
     fn view_window(&self, id: Id) -> Element<'_, Self::Message> {
-        if self.settings_window == Some(id) {
-            return self.settings_view(id);
-        }
-    
         if self.popup != Some(id) {
             return widget::column::with_children([]).into();
         }
-    
+
         let Spacing {
             space_xxs,
             space_s,
             ..
         } = theme::active().cosmic().spacing;
-        
+
         let service_toggle = widget::toggler(self.service_enabled)
             .label(Some("Transmission".to_string()))
             .width(cosmic::iced::Length::Fill)
@@ -286,16 +286,7 @@ impl cosmic::Application for AppModel {
 
     fn subscription(&self) -> Subscription<Self::Message> {
         Subscription::batch([
-            event::listen_with(|event, _, id| {
-                if let cosmic::iced::Event::Window(
-                    cosmic::iced::window::Event::Closed,
-                ) = event
-                {
-                    Some(Message::SettingsClosed(id))
-                } else {
-                    None
-                }
-            }),
+            activation_token_subscription(0).map(Message::Token),
             Subscription::run(|| {
                 cosmic::iced::stream::channel(
                     1,
@@ -318,6 +309,28 @@ impl cosmic::Application for AppModel {
         message: Self::Message,
     ) -> Task<cosmic::Action<Self::Message>> {
         match message {
+	        Message::Token(update) => match update {
+	            TokenUpdate::Init(tx) => {
+	                self.token_tx = Some(tx);
+	            }
+
+	            TokenUpdate::Finished => {
+	                self.token_tx = None;
+	            }
+
+	            TokenUpdate::ActivationToken { token, .. } => {
+	                let mut cmd = Command::new("cosmic-transmission-settings");
+
+	                if let Some(token) = token {
+	                    cmd.env("XDG_ACTIVATION_TOKEN", &token);
+	                    cmd.env("DESKTOP_STARTUP_ID", &token);
+	                }
+
+	                tokio::spawn(async move {
+	                    let _ = cmd.status().await;
+	                });
+	            }
+	        },
             Message::TogglePopup => {
                 if let Some(popup) = self.popup.take() {
                     return destroy_popup(popup);
@@ -350,52 +363,13 @@ impl cosmic::Application for AppModel {
             }
 
             Message::OpenSettings => {
-                if self.settings_window.is_some() {
-                    return Task::none();
-                }
+                let exec = "cosmic-transmission-settings".to_string();
 
-                let (id, spawn_window) =
-                    cosmic::iced::window::open(cosmic::iced::window::Settings {
-                        position: Default::default(),
-                        exit_on_close_request: false,
-                        decorations: false,
-                        ..Default::default()
+                if let Some(tx) = self.token_tx.as_ref() {
+                    let _ = tx.send(TokenRequest {
+                        app_id: Self::APP_ID.to_string(),
+                        exec,
                     });
-
-                self.settings_window = Some(id);
-
-                _ = self.set_window_title(
-                    "Transmission Settings".to_string(),
-                    id,
-                );
-
-                return spawn_window.map(|_| {
-                    cosmic::Action::App(Message::SettingsOpened)
-                });
-            }
-
-            Message::SettingsOpened => {}
-
-            Message::SettingsHostChanged(host) => {
-                self.config.host = host;
-            }
-            
-            Message::SettingsRpcPortChanged(port) => {
-                if let Ok(port) = port.parse::<u16>() {
-                    self.config.rpc_port = port;
-                }
-            }
-
-            Message::CloseSettings(id) => {
-                if self.settings_window == Some(id) {
-                    return cosmic::iced::window::close(id);
-                }
-            }
-
-            Message::SettingsClosed(id) => {
-                if self.settings_window == Some(id) {
-                    self.save_config();
-                    self.settings_window = None;
                 }
             }
 
@@ -457,7 +431,7 @@ impl cosmic::Application for AppModel {
                 let action = if enabled { "start" } else { "stop" };
 
                 let service = ServiceController::new(self.config.service_scope);
-                
+
                 return Task::perform(
                     service.action(action),
                     |state| {
@@ -511,10 +485,6 @@ impl cosmic::Application for AppModel {
                         .stderr(Stdio::null())
                         .spawn();
                 });
-            }
-            
-            Message::SettingsServiceScopeChanged(scope) => {
-                self.config.service_scope = scope;
             }
         }
 
@@ -573,80 +543,6 @@ impl AppModel {
         ])
         .into()
     }
-
-	fn settings_view(&self, id: Id) -> Element<'_, Message> {
-	    let focused = self
-	        .core
-	        .focused_window()
-	        .map(|window_id| window_id == id)
-	        .unwrap_or_default();
-	
-	    let host = widget::settings::item(
-	        "Host",
-	        widget::text_input("localhost", &self.config.host)
-	            .on_input(Message::SettingsHostChanged)
-	            .width(cosmic::iced::Length::Fixed(220.0)),
-	    );
-	
-	    let rpc_port = widget::settings::item(
-	        "RPC port",
-	        widget::text_input("9091", self.config.rpc_port.to_string())
-	            .on_input(Message::SettingsRpcPortChanged)
-	            .width(cosmic::iced::Length::Fixed(120.0)),
-	    );
-
-		let service_scope = widget::settings::item(
-	        "Scope",
-	        cosmic::iced::widget::pick_list(
-	            [ServiceScope::User, ServiceScope::System],
-	            Some(self.config.service_scope),
-	            Message::SettingsServiceScopeChanged,
-	        )
-	        .width(cosmic::iced::Length::Fixed(120.0)),
-	    );
-	    let settings = widget::settings::view_column(vec![
-	        widget::settings::section()
-	            .title("Connection")
-	            .add(host)
-	            .add(rpc_port)
-	            .into(),
-	        widget::settings::section()
-	            .title("Service")
-	            .add(service_scope)
-	            .into(),
-	    ]);
-			
-		widget::container(widget::column::with_children([
-		    cosmic::widget::header_bar()
-		        .on_close(Message::CloseSettings(id))
-		        .focused(focused)
-		        .into(),
-		    widget::container(
-		        widget::scrollable(settings)
-		            .width(cosmic::iced::Length::Fill)
-		            .height(cosmic::iced::Length::Fill),
-		    )
-		    .width(cosmic::iced::Length::Fill)
-		    .padding(theme::active().cosmic().spacing.space_l)
-		    .into(),
-		]))
-	    .class(theme::Container::WindowBackground)
-	    .width(cosmic::iced::Length::Fill)
-	    .height(cosmic::iced::Length::Fill)
-	    .into()	    
-	}
-
-	fn save_config(&self) {
-	    let Ok(config) = cosmic::cosmic_config::Config::new(
-	        Self::APP_ID,
-	        ConnectionConfig::VERSION,
-	    ) else {
-	        return;
-	    };
-	
-	    let _ = self.config.write_entry(&config);
-	}
-
 }
 
 async fn query_transmission(
