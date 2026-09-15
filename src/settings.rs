@@ -1,8 +1,8 @@
 use cosmic::{
     app::Application,
     iced::{
-    	window::Id,
-    	Subscription,
+        window::Id,
+        Subscription,
     },
     prelude::*,
     theme,
@@ -41,9 +41,10 @@ impl Application for SettingsModel {
     }
 
     fn init(
-         core: cosmic::Core,
+         mut core: cosmic::Core,
          _flags: Self::Flags,
      ) -> (Self, cosmic::Task<cosmic::Action<Self::Message>>) {
+        core.set_header_title("Transmission daemon settings".to_string());
         let config = cosmic::cosmic_config::Config::new(
             "io.github.cosmic.Transmission",
             ConnectionConfig::VERSION,
@@ -95,9 +96,9 @@ impl Application for SettingsModel {
         cosmic::Task::none()
     }
 
-    fn view(&self) -> Element<'_, Self::Message> {
-        self.settings_view(self.core.main_window_id().unwrap())
-    }
+   fn view(&self) -> Element<'_, Self::Message> {
+       self.settings_view()
+   }
 
     fn subscription(&self) -> Subscription<Self::Message> {
         Subscription::none()
@@ -105,13 +106,7 @@ impl Application for SettingsModel {
 }
 
 impl SettingsModel {
-    fn settings_view(&self, id: Id) -> Element<'_, Message> {
-        let focused = self
-            .core
-            .focused_window()
-            .map(|window_id| window_id == id)
-            .unwrap_or_default();
-
+    fn settings_view(&self) -> Element<'_, Message> {
         let host = widget::settings::item(
             "Host",
             widget::text_input("localhost", &self.config.host)
@@ -148,22 +143,15 @@ impl SettingsModel {
                 .into(),
         ]);
 
-        widget::container(widget::column::with_children([
-            cosmic::widget::header_bar()
-                .focused(focused)
-                .into(),
-            widget::container(
-                widget::scrollable(settings)
-                    .width(cosmic::iced::Length::Fill)
-                    .height(cosmic::iced::Length::Fill),
-            )
-            .width(cosmic::iced::Length::Fill)
-            .padding(theme::active().cosmic().spacing.space_l)
-            .into(),
-        ]))
+        widget::container(
+            widget::scrollable(settings)
+                .width(cosmic::iced::Length::Fill)
+                .height(cosmic::iced::Length::Fill),
+        )
         .class(theme::Container::WindowBackground)
         .width(cosmic::iced::Length::Fill)
         .height(cosmic::iced::Length::Fill)
+        .padding(theme::active().cosmic().spacing.space_l)
         .into()
     }
 
