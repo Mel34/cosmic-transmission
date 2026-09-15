@@ -136,30 +136,41 @@ The Web UI remains the primary interface for detailed torrent management. The ap
 
 ## The applet
 
-The panel icon reflects the current Transmission daemon state:
-
-| State    | Icon                            |
-| -------- | ------------------------------- |
-| Checking | `network-server-symbolic`       |
-| Running  | `network-receive-symbolic`      |
-| Stopped  | `network-disconnected-symbolic` |
-| Error    | `network-error-symbolic`        |
-
-Clicking the panel icon opens the popup.
+The panel applet provides a compact COSMIC-native interface for controlling Transmission.
 
 The popup provides:
 
+* Start / Stop control for the Transmission daemon;
 * current daemon state;
-* Start / Stop control;
 * download and upload rates;
 * number of downloading torrents;
 * number of seeding torrents;
 * number of active torrents;
-* Open Web UI button.
+* Open Web UI;
+* Settings.
 
-Transmission statistics are obtained through the Transmission RPC interface.
+The applet periodically checks the Transmission service state and obtains transfer statistics through the Transmission RPC interface.
 
-The applet periodically checks the user systemd service and tracks service transitions such as starting and stopping.
+### Settings
+
+The standalone Settings application provides configuration for:
+
+* Transmission RPC host;
+* Transmission RPC port;
+* systemd service scope (User or System);
+* statistics polling interval.
+
+The polling interval can be set to:
+
+* 1 second;
+* 2 seconds;
+* 5 seconds;
+* 10 seconds;
+* 30 seconds.
+
+The default polling interval is 2 seconds.
+
+Configuration is stored using COSMIC configuration and persists across application restarts.
 
 ## Design goals
 

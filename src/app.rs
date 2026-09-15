@@ -1,39 +1,29 @@
 use std::process::Stdio;
-use std::time::Duration;
 
-use cosmic_transmission::config::{ConnectionConfig, ServiceScope};
-use cosmic_transmission::service::{ServiceController, ServiceState};
 use cosmic_config::CosmicConfigEntry;
+use cosmic_transmission::config::{AppConfig, ConnectionConfig, ServiceScope};
+use cosmic_transmission::service::{ServiceController, ServiceState};
 
 use cosmic::{
     applet::{menu_button, padded_control},
     cosmic_theme::Spacing,
     iced::futures,
     iced::futures::SinkExt,
-    iced::platform_specific::shell::wayland::commands::popup::{
-        destroy_popup,
-        get_popup,
-    },
+    iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup},
     iced::window::Id,
     iced::{Limits, Subscription},
     prelude::*,
-    theme,
-    widget,
+    theme, widget,
 };
 
 use cosmic::{
-    applet::token::subscription::{
-        activation_token_subscription,
-        TokenRequest,
-        TokenUpdate,
-    },
+    applet::token::subscription::{TokenRequest, TokenUpdate, activation_token_subscription},
     cctk::sctk::reexports::calloop,
 };
 
 use tokio::process::Command;
 
 const WEB_UI: &str = "http://localhost:9091";
-const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 const STATUS_DOT_SVG: &[u8] = br#"
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8">
@@ -91,6 +81,7 @@ pub struct AppModel {
     rpc_client: RpcClient,
     rpc_session_id: Option<String>,
     token_tx: Option<calloop::channel::Sender<TokenRequest>>,
+    app_config: AppConfig,
 }
 
 impl Default for AppModel {
@@ -105,6 +96,7 @@ impl Default for AppModel {
             rpc_client: RpcClient::new(&ConnectionConfig::default()),
             rpc_session_id: None,
             token_tx: None,
+            app_config: AppConfig::default(),
         }
     }
 }
@@ -124,54 +116,47 @@ impl cosmic::Application for AppModel {
         &mut self.core
     }
 
-	fn init(
-	    core: cosmic::Core,
-	    _flags: Self::Flags,
-	) -> (
-	    Self,
-	    Task<cosmic::Action<Self::Message>>,
-	) {
-	    let config = cosmic::cosmic_config::Config::new(
-	        Self::APP_ID,
-	        ConnectionConfig::VERSION,
-	    )
-	    .ok()
-	    .map(|config| {
-	        ConnectionConfig::get_entry(&config)
-	            .unwrap_or_else(|(_, config)| config)
-	    })
-	    .unwrap_or_default();
+    fn init(
+        core: cosmic::Core,
+        _flags: Self::Flags,
+    ) -> (Self, Task<cosmic::Action<Self::Message>>) {
+        let config = cosmic::cosmic_config::Config::new(Self::APP_ID, ConnectionConfig::VERSION)
+            .ok()
+            .map(|config| ConnectionConfig::get_entry(&config).unwrap_or_else(|(_, config)| config))
+            .unwrap_or_default();
 
-	    let rpc_client = RpcClient::new(&config);
+        let app_config = cosmic::cosmic_config::Config::new(Self::APP_ID, AppConfig::VERSION)
+            .ok()
+            .map(|config| AppConfig::get_entry(&config).unwrap_or_else(|(_, config)| config))
+            .unwrap_or_default();
 
-	    let mut app = Self {
-	        core,
-	        config,
-	        ..Default::default()
-	    };
+        let rpc_client = RpcClient::new(&config);
 
-	    app.rpc_client = rpc_client;
+        let mut app = Self {
+            core,
+            config,
+            app_config,
+            ..Default::default()
+        };
 
-	    let rpc_client = app.rpc_client.clone();
-	    let rpc_session_id = app.rpc_session_id.clone();
+        app.rpc_client = rpc_client;
 
-	    let task = Task::perform(
-	        query_transmission(
-	            rpc_client,
-	            rpc_session_id,
-	            app.config.service_scope,
-	        ),
-	        |(state, stats, rpc_session_id)| {
-	            cosmic::Action::App(Message::StatusChecked {
-	                state,
-	                stats,
-	                rpc_session_id,
-	            })
-	        },
-	    );
+        let rpc_client = app.rpc_client.clone();
+        let rpc_session_id = app.rpc_session_id.clone();
 
-	    (app, task)
-	}
+        let task = Task::perform(
+            query_transmission(rpc_client, rpc_session_id, app.config.service_scope),
+            |(state, stats, rpc_session_id)| {
+                cosmic::Action::App(Message::StatusChecked {
+                    state,
+                    stats,
+                    rpc_session_id,
+                })
+            },
+        );
+
+        (app, task)
+    }
 
     fn on_close_requested(&self, id: Id) -> Option<Message> {
         Some(Message::PopupClosed(id))
@@ -191,9 +176,7 @@ impl cosmic::Application for AppModel {
         }
 
         let Spacing {
-            space_xxs,
-            space_s,
-            ..
+            space_xxs, space_s, ..
         } = theme::active().cosmic().spacing;
 
         let service_toggle = widget::toggler(self.service_enabled)
@@ -205,22 +188,12 @@ impl cosmic::Application for AppModel {
             ServiceState::Running | ServiceState::Stopped => {
                 service_toggle.on_toggle(Message::ToggleService)
             }
-            ServiceState::Checking | ServiceState::Error => {
-                service_toggle
-            }
+            ServiceState::Checking | ServiceState::Error => service_toggle,
         };
 
         let stats = widget::column::with_children([
-            widget::text(format!(
-                "↓ {}",
-                format_speed(self.stats.download_speed)
-            ))
-            .into(),
-            widget::text(format!(
-                "↑ {}",
-                format_speed(self.stats.upload_speed)
-            ))
-            .into(),
+            widget::text(format!("↓ {}", format_speed(self.stats.download_speed))).into(),
+            widget::text(format!("↑ {}", format_speed(self.stats.upload_speed))).into(),
         ])
         .spacing(space_xxs);
 
@@ -249,23 +222,19 @@ impl cosmic::Application for AppModel {
         ])
         .spacing(space_xxs);
 
-		let web_ui = match self.state {
-		    ServiceState::Running => {
-		        menu_button(widget::text("Open Web UI"))
-		            .on_press(Message::OpenWebUi)
-		    }
-		   ServiceState::Checking
-		   | ServiceState::Stopped
-		   | ServiceState::Error => {
-		       widget::button::custom(widget::text("Open Web UI"))
-		           .padding(cosmic::applet::menu_control_padding())
-		           .width(cosmic::iced::Length::Fill)
-		           .class(theme::Button::MenuItem)
-		   }
-		};
+        let web_ui = match self.state {
+            ServiceState::Running => {
+                menu_button(widget::text("Open Web UI")).on_press(Message::OpenWebUi)
+            }
+            ServiceState::Checking | ServiceState::Stopped | ServiceState::Error => {
+                widget::button::custom(widget::text("Open Web UI"))
+                    .padding(cosmic::applet::menu_control_padding())
+                    .width(cosmic::iced::Length::Fill)
+                    .class(theme::Button::MenuItem)
+            }
+        };
 
-		let settings = menu_button(widget::text("Settings"))
-		    .on_press(Message::OpenSettings);
+        let settings = menu_button(widget::text("Settings")).on_press(Message::OpenSettings);
 
         let content = widget::column::with_children([
             padded_control(service_toggle).into(),
@@ -288,14 +257,18 @@ impl cosmic::Application for AppModel {
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
+        let refresh_interval = self.app_config.poll_interval.duration();
+
         Subscription::batch([
             activation_token_subscription(0).map(Message::Token),
-            Subscription::run(|| {
+            Subscription::run_with(refresh_interval, |refresh_interval| {
+                let interval = *refresh_interval;
+
                 cosmic::iced::stream::channel(
                     1,
-                    |mut sender: futures::channel::mpsc::Sender<Message>| async move {
+                    move |mut sender: futures::channel::mpsc::Sender<Message>| async move {
                         loop {
-                            tokio::time::sleep(REFRESH_INTERVAL).await;
+                            tokio::time::sleep(interval).await;
 
                             if sender.send(Message::Refresh).await.is_err() {
                                 break;
@@ -306,34 +279,30 @@ impl cosmic::Application for AppModel {
             }),
         ])
     }
-
-    fn update(
-        &mut self,
-        message: Self::Message,
-    ) -> Task<cosmic::Action<Self::Message>> {
+    fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
-	        Message::Token(update) => match update {
-	            TokenUpdate::Init(tx) => {
-	                self.token_tx = Some(tx);
-	            }
+            Message::Token(update) => match update {
+                TokenUpdate::Init(tx) => {
+                    self.token_tx = Some(tx);
+                }
 
-	            TokenUpdate::Finished => {
-	                self.token_tx = None;
-	            }
+                TokenUpdate::Finished => {
+                    self.token_tx = None;
+                }
 
-	            TokenUpdate::ActivationToken { token, .. } => {
-	                let mut cmd = Command::new("cosmic-transmission-settings");
+                TokenUpdate::ActivationToken { token, .. } => {
+                    let mut cmd = Command::new("cosmic-transmission-settings");
 
-	                if let Some(token) = token {
-	                    cmd.env("XDG_ACTIVATION_TOKEN", &token);
-	                    cmd.env("DESKTOP_STARTUP_ID", &token);
-	                }
+                    if let Some(token) = token {
+                        cmd.env("XDG_ACTIVATION_TOKEN", &token);
+                        cmd.env("DESKTOP_STARTUP_ID", &token);
+                    }
 
-	                tokio::spawn(async move {
-	                    let _ = cmd.status().await;
-	                });
-	            }
-	        },
+                    tokio::spawn(async move {
+                        let _ = cmd.status().await;
+                    });
+                }
+            },
             Message::TogglePopup => {
                 if let Some(popup) = self.popup.take() {
                     return destroy_popup(popup);
@@ -381,11 +350,7 @@ impl cosmic::Application for AppModel {
                 let rpc_session_id = self.rpc_session_id.clone();
 
                 return Task::perform(
-                    query_transmission(
-                        rpc_client,
-                        rpc_session_id,
-                        self.config.service_scope,
-                    ),
+                    query_transmission(rpc_client, rpc_session_id, self.config.service_scope),
                     |(state, stats, rpc_session_id)| {
                         cosmic::Action::App(Message::StatusChecked {
                             state,
@@ -419,10 +384,7 @@ impl cosmic::Application for AppModel {
 
                 self.rpc_session_id = rpc_session_id;
 
-                if matches!(
-                    state,
-                    ServiceState::Stopped | ServiceState::Error
-                ) {
+                if matches!(state, ServiceState::Stopped | ServiceState::Error) {
                     self.stats = TransmissionStats::default();
                 }
             }
@@ -435,14 +397,9 @@ impl cosmic::Application for AppModel {
 
                 let service = ServiceController::new(self.config.service_scope);
 
-                return Task::perform(
-                    service.action(action),
-                    |state| {
-                        cosmic::Action::App(
-                            Message::ServiceActionFinished { state },
-                        )
-                    },
-                );
+                return Task::perform(service.action(action), |state| {
+                    cosmic::Action::App(Message::ServiceActionFinished { state })
+                });
             }
 
             Message::ServiceActionFinished { state } => {
@@ -458,13 +415,11 @@ impl cosmic::Application for AppModel {
                         return Task::perform(
                             query_stats(rpc_client, rpc_session_id),
                             |(stats, rpc_session_id)| {
-                                cosmic::Action::App(
-                                    Message::StatusChecked {
-                                        state: ServiceState::Running,
-                                        stats,
-                                        rpc_session_id,
-                                    },
-                                )
+                                cosmic::Action::App(Message::StatusChecked {
+                                    state: ServiceState::Running,
+                                    stats,
+                                    rpc_session_id,
+                                })
                             },
                         );
                     }
@@ -506,26 +461,16 @@ impl AppModel {
             .size(16);
 
         let (status_svg, status_color) = match self.state {
-            ServiceState::Running => (
-                STATUS_DOT_SVG,
-                theme::active().cosmic().success_color(),
-            ),
-            ServiceState::Checking => (
-                STATUS_DOT_SVG,
-                theme::active().cosmic().warning_color(),
-            ),
-            ServiceState::Stopped => (
-                STATUS_DOT_SVG,
-                theme::active().cosmic().destructive_color(),
-            ),
+            ServiceState::Running => (STATUS_DOT_SVG, theme::active().cosmic().success_color()),
+            ServiceState::Checking => (STATUS_DOT_SVG, theme::active().cosmic().warning_color()),
+            ServiceState::Stopped => (STATUS_DOT_SVG, theme::active().cosmic().destructive_color()),
             ServiceState::Error => (
                 STATUS_ERROR_SVG,
                 theme::active().cosmic().destructive_color(),
             ),
         };
 
-        let status_handle =
-            widget::icon::from_svg_bytes(status_svg).symbolic(true);
+        let status_handle = widget::icon::from_svg_bytes(status_svg).symbolic(true);
 
         let status = widget::icon(status_handle)
             .size(10)
@@ -552,18 +497,13 @@ async fn query_transmission(
     rpc_client: RpcClient,
     session_id: Option<String>,
     service_scope: ServiceScope,
-) -> (
-    ServiceState,
-    Option<TransmissionStats>,
-    Option<String>,
-) {
+) -> (ServiceState, Option<TransmissionStats>, Option<String>) {
     let service = ServiceController::new(service_scope);
     let state = service.status().await;
 
     match state {
         ServiceState::Running => {
-            let (stats, session_id) =
-                query_stats(rpc_client, session_id).await;
+            let (stats, session_id) = query_stats(rpc_client, session_id).await;
 
             (ServiceState::Running, stats, session_id)
         }
@@ -572,11 +512,7 @@ async fn query_transmission(
             Some(TransmissionStats::default()),
             session_id,
         ),
-        ServiceState::Checking => (
-            ServiceState::Checking,
-            None,
-            session_id,
-        ),
+        ServiceState::Checking => (ServiceState::Checking, None, session_id),
         ServiceState::Error => (
             ServiceState::Error,
             Some(TransmissionStats::default()),
@@ -645,12 +581,10 @@ async fn query_stats(
         },
     };
 
-    let mut request_builder =
-        rpc_client.client.post(&rpc_client.url).json(&request);
+    let mut request_builder = rpc_client.client.post(&rpc_client.url).json(&request);
 
     if let Some(session_id) = session_id.as_deref() {
-        request_builder = request_builder
-            .header("X-Transmission-Session-Id", session_id);
+        request_builder = request_builder.header("X-Transmission-Session-Id", session_id);
     }
 
     let response = match request_builder.send().await {
@@ -693,9 +627,7 @@ async fn query_stats(
     (None, session_id)
 }
 
-async fn parse_rpc_response(
-    response: reqwest::Response,
-) -> TransmissionStats {
+async fn parse_rpc_response(response: reqwest::Response) -> TransmissionStats {
     let response: RpcResponse = match response.json().await {
         Ok(response) => response,
         Err(_) => return TransmissionStats::default(),
@@ -732,15 +664,9 @@ async fn parse_rpc_response(
 
 fn format_speed(bytes_per_second: u64) -> String {
     if bytes_per_second >= 1024 * 1024 {
-        format!(
-            "{:.1} MiB/s",
-            bytes_per_second as f64 / (1024.0 * 1024.0)
-        )
+        format!("{:.1} MiB/s", bytes_per_second as f64 / (1024.0 * 1024.0))
     } else if bytes_per_second >= 1024 {
-        format!(
-            "{:.0} KiB/s",
-            bytes_per_second as f64 / 1024.0
-        )
+        format!("{:.0} KiB/s", bytes_per_second as f64 / 1024.0)
     } else {
         format!("{} B/s", bytes_per_second)
     }

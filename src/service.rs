@@ -56,7 +56,7 @@ async fn user_service_status() -> ServiceState {
             "activating" | "deactivating" => ServiceState::Checking,
             _ => ServiceState::Error,
         },
-        Err(_) => ServiceState::Error,      
+        Err(_) => ServiceState::Error,
     }
 }
 
@@ -116,21 +116,17 @@ async fn system_service_status() -> ServiceState {
         return ServiceState::Stopped;
     };
 
-	let Ok(builder) = SystemdUnitProxy::builder(&connection)
-	    .path(unit_path)
-	else {
-	    return ServiceState::Error;
-	};
+    let Ok(builder) = SystemdUnitProxy::builder(&connection).path(unit_path) else {
+        return ServiceState::Error;
+    };
 
-	let Ok(unit) = builder.build().await else {
-	    return ServiceState::Error;
-	};
+    let Ok(unit) = builder.build().await else {
+        return ServiceState::Error;
+    };
 
     match unit.active_state().await.as_deref() {
         Ok("active") => ServiceState::Running,
-        Ok("activating" | "deactivating" | "reloading") => {
-            ServiceState::Checking
-        }
+        Ok("activating" | "deactivating" | "reloading") => ServiceState::Checking,
         Ok("inactive" | "failed") => ServiceState::Stopped,
         _ => ServiceState::Error,
     }
