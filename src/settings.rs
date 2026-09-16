@@ -110,6 +110,11 @@ impl Application for SettingsModel {
 
 impl SettingsModel {
     fn settings_view(&self) -> Element<'_, Message> {
+        static AUTOSIZE_ID: std::sync::LazyLock<cosmic::widget::Id> =
+            std::sync::LazyLock::new(|| {
+                cosmic::widget::Id::new("io.github.cosmic.Transmission.Settings.autosize")
+            });
+
         let host = widget::settings::item(
             "Host",
             widget::text_input("localhost", &self.config.host)
@@ -166,18 +171,27 @@ impl SettingsModel {
                 .into(),
         ]);
 
-        widget::container(
-            widget::scrollable(settings)
-                .width(cosmic::iced::Length::Fill)
-                .height(cosmic::iced::Length::Fill),
-        )
-        .class(theme::Container::WindowBackground)
-        .width(cosmic::iced::Length::Fill)
-        .height(cosmic::iced::Length::Fill)
-        .padding(theme::active().cosmic().spacing.space_l)
-        .into()
-    }
+        let spacing = theme::active().cosmic().spacing;
 
+        let content = widget::container(settings)
+            .class(theme::Container::WindowBackground)
+            .padding([
+                spacing.space_s,
+                spacing.space_s,
+                spacing.space_xxl,
+                spacing.space_s,
+            ])
+            .height(cosmic::iced::Length::Shrink);
+
+        cosmic::widget::autosize::autosize(content, AUTOSIZE_ID.clone())
+            .limits(
+                cosmic::iced::Limits::NONE
+                    .min_height(1.0)
+                    .min_width(500.0)
+                    .max_width(500.0),
+            )
+            .into()
+    }
     fn save_config(&self) {
         let Ok(config) = cosmic::cosmic_config::Config::new(
             "io.github.cosmic.Transmission",

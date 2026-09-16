@@ -7,8 +7,6 @@ use cosmic_transmission::service::{ServiceController, ServiceState};
 use cosmic::{
     applet::{menu_button, padded_control},
     cosmic_theme::Spacing,
-    iced::futures,
-    iced::futures::SinkExt,
     iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup},
     iced::window::Id,
     iced::{Limits, Subscription},
@@ -257,28 +255,13 @@ impl cosmic::Application for AppModel {
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
-        let refresh_interval = self.app_config.poll_interval.duration();
-
         Subscription::batch([
             activation_token_subscription(0).map(Message::Token),
-            Subscription::run_with(refresh_interval, |refresh_interval| {
-                let interval = *refresh_interval;
-
-                cosmic::iced::stream::channel(
-                    1,
-                    move |mut sender: futures::channel::mpsc::Sender<Message>| async move {
-                        loop {
-                            tokio::time::sleep(interval).await;
-
-                            if sender.send(Message::Refresh).await.is_err() {
-                                break;
-                            }
-                        }
-                    },
-                )
-            }),
+            cosmic::iced::time::every(self.app_config.poll_interval.duration())
+                .map(|_| Message::Refresh),
         ])
     }
+
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
             Message::Token(update) => match update {
