@@ -1,7 +1,7 @@
 use std::process::Stdio;
 
 use cosmic_config::CosmicConfigEntry;
-use cosmic_transmission::config::{AppConfig, ConnectionConfig, ServiceScope};
+use cosmic_transmission::config::{AppConfig, Connection, ConnectionsConfig, ServiceScope};
 use cosmic_transmission::service::{ServiceController, ServiceState};
 
 use cosmic::{
@@ -20,8 +20,6 @@ use cosmic::{
 };
 
 use tokio::process::Command;
-
-const WEB_UI: &str = "http://localhost:9091";
 
 const STATUS_DOT_SVG: &[u8] = br#"
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8">
@@ -57,6 +55,7 @@ pub enum Message {
     PopupClosed(Id),
     OpenSettings,
     Refresh,
+    SelectConnection(uuid::Uuid),
     StatusChecked {
         state: ServiceState,
         stats: Option<TransmissionStats>,
@@ -75,7 +74,8 @@ pub struct AppModel {
     state: ServiceState,
     service_enabled: bool,
     stats: TransmissionStats,
-    config: ConnectionConfig,
+    connections_config: ConnectionsConfig,
+    connection: Connection,
     rpc_client: RpcClient,
     rpc_session_id: Option<String>,
     token_tx: Option<calloop::channel::Sender<TokenRequest>>,
@@ -84,14 +84,23 @@ pub struct AppModel {
 
 impl Default for AppModel {
     fn default() -> Self {
+        let connections_config = ConnectionsConfig::default();
+        let connection = connections_config
+            .connections
+            .iter()
+            .find(|connection| connection.id == connections_config.active_connection)
+            .cloned()
+            .unwrap_or_else(|| connections_config.connections[0].clone());
+
         Self {
             core: cosmic::Core::default(),
             popup: None,
             state: ServiceState::Checking,
             service_enabled: false,
             stats: TransmissionStats::default(),
-            config: ConnectionConfig::default(),
-            rpc_client: RpcClient::new(&ConnectionConfig::default()),
+            rpc_client: RpcClient::new(&connection),
+            connections_config,
+            connection,
             rpc_session_id: None,
             token_tx: None,
             app_config: AppConfig::default(),
@@ -118,21 +127,32 @@ impl cosmic::Application for AppModel {
         core: cosmic::Core,
         _flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
-        let config = cosmic::cosmic_config::Config::new(Self::APP_ID, ConnectionConfig::VERSION)
-            .ok()
-            .map(|config| ConnectionConfig::get_entry(&config).unwrap_or_else(|(_, config)| config))
-            .unwrap_or_default();
+        let connections_config =
+            cosmic::cosmic_config::Config::new(Self::APP_ID, ConnectionsConfig::VERSION)
+                .ok()
+                .map(|config| {
+                    ConnectionsConfig::get_entry(&config).unwrap_or_else(|(_, config)| config)
+                })
+                .unwrap_or_default();
+
+        let connection = connections_config
+            .connections
+            .iter()
+            .find(|connection| connection.id == connections_config.active_connection)
+            .cloned()
+            .unwrap_or_else(|| connections_config.connections[0].clone());
 
         let app_config = cosmic::cosmic_config::Config::new(Self::APP_ID, AppConfig::VERSION)
             .ok()
             .map(|config| AppConfig::get_entry(&config).unwrap_or_else(|(_, config)| config))
             .unwrap_or_default();
 
-        let rpc_client = RpcClient::new(&config);
+        let rpc_client = RpcClient::new(&connection);
 
         let mut app = Self {
             core,
-            config,
+            connections_config,
+            connection,
             app_config,
             ..Default::default()
         };
@@ -141,9 +161,10 @@ impl cosmic::Application for AppModel {
 
         let rpc_client = app.rpc_client.clone();
         let rpc_session_id = app.rpc_session_id.clone();
+        let connection = app.connection.clone();
 
         let task = Task::perform(
-            query_transmission(rpc_client, rpc_session_id, app.config.service_scope),
+            query_connection(rpc_client, rpc_session_id, connection),
             |(state, stats, rpc_session_id)| {
                 cosmic::Action::App(Message::StatusChecked {
                     state,
@@ -177,17 +198,31 @@ impl cosmic::Application for AppModel {
             space_xxs, space_s, ..
         } = theme::active().cosmic().spacing;
 
+        let connection_picker = cosmic::iced::widget::pick_list(
+            self.connections_config.connections.clone(),
+            Some(self.connection.clone()),
+            |connection| Message::SelectConnection(connection.id),
+        )
+        .width(cosmic::iced::Length::Fill);
+
         let service_toggle = widget::toggler(self.service_enabled)
             .label(Some("Transmission".to_string()))
             .width(cosmic::iced::Length::Fill)
             .text_size(14);
 
-        let service_toggle = match self.state {
-            ServiceState::Running | ServiceState::Stopped => {
-                service_toggle.on_toggle(Message::ToggleService)
+        let service_toggle = if self.connection.service_scope.is_some() {
+            match self.state {
+                ServiceState::Running | ServiceState::Stopped => {
+                    service_toggle.on_toggle(Message::ToggleService)
+                }
+                ServiceState::Checking | ServiceState::Error => service_toggle,
             }
-            ServiceState::Checking | ServiceState::Error => service_toggle,
+        } else {
+            service_toggle
         };
+
+        let top_row = widget::row::with_children([connection_picker.into(), service_toggle.into()])
+            .spacing(space_s);
 
         let stats = widget::column::with_children([
             widget::text(format!("↓ {}", format_speed(self.stats.download_speed))).into(),
@@ -235,7 +270,7 @@ impl cosmic::Application for AppModel {
         let settings = menu_button(widget::text("Settings")).on_press(Message::OpenSettings);
 
         let content = widget::column::with_children([
-            padded_control(service_toggle).into(),
+            padded_control(top_row).into(),
             padded_control(widget::divider::horizontal::default())
                 .padding([space_xxs, space_s])
                 .into(),
@@ -262,7 +297,7 @@ impl cosmic::Application for AppModel {
         ])
     }
 
-    fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
+    fn update(&mut self, message: Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
             Message::Token(update) => match update {
                 TokenUpdate::Init(tx) => {
@@ -286,6 +321,7 @@ impl cosmic::Application for AppModel {
                     });
                 }
             },
+
             Message::TogglePopup => {
                 if let Some(popup) = self.popup.take() {
                     return destroy_popup(popup);
@@ -328,12 +364,55 @@ impl cosmic::Application for AppModel {
                 }
             }
 
+            Message::SelectConnection(id) => {
+                let Some(connection) = self
+                    .connections_config
+                    .connections
+                    .iter()
+                    .find(|connection| connection.id == id)
+                    .cloned()
+                else {
+                    return Task::none();
+                };
+
+                self.connections_config.active_connection = id;
+                self.connection = connection;
+                self.rpc_client = RpcClient::new(&self.connection);
+                self.rpc_session_id = None;
+                self.stats = TransmissionStats::default();
+
+                if self.connection.service_scope.is_none() {
+                    self.service_enabled = false;
+                    self.state = ServiceState::Checking;
+                } else {
+                    self.service_enabled = false;
+                    self.state = ServiceState::Checking;
+                }
+
+                self.save_connections_config();
+
+                let rpc_client = self.rpc_client.clone();
+                let connection = self.connection.clone();
+
+                return Task::perform(
+                    query_connection(rpc_client, None, connection),
+                    |(state, stats, rpc_session_id)| {
+                        cosmic::Action::App(Message::StatusChecked {
+                            state,
+                            stats,
+                            rpc_session_id,
+                        })
+                    },
+                );
+            }
+
             Message::Refresh => {
                 let rpc_client = self.rpc_client.clone();
                 let rpc_session_id = self.rpc_session_id.clone();
+                let connection = self.connection.clone();
 
                 return Task::perform(
-                    query_transmission(rpc_client, rpc_session_id, self.config.service_scope),
+                    query_connection(rpc_client, rpc_session_id, connection),
                     |(state, stats, rpc_session_id)| {
                         cosmic::Action::App(Message::StatusChecked {
                             state,
@@ -351,14 +430,18 @@ impl cosmic::Application for AppModel {
             } => {
                 self.state = state;
 
-                match state {
-                    ServiceState::Running => {
-                        self.service_enabled = true;
+                if self.connection.service_scope.is_some() {
+                    match state {
+                        ServiceState::Running => {
+                            self.service_enabled = true;
+                        }
+                        ServiceState::Stopped => {
+                            self.service_enabled = false;
+                        }
+                        ServiceState::Checking | ServiceState::Error => {}
                     }
-                    ServiceState::Stopped => {
-                        self.service_enabled = false;
-                    }
-                    ServiceState::Checking | ServiceState::Error => {}
+                } else {
+                    self.service_enabled = false;
                 }
 
                 if let Some(stats) = stats {
@@ -373,12 +456,16 @@ impl cosmic::Application for AppModel {
             }
 
             Message::ToggleService(enabled) => {
+                if self.connection.service_scope.is_none() {
+                    return Task::none();
+                }
+
                 self.service_enabled = enabled;
                 self.state = ServiceState::Checking;
 
                 let action = if enabled { "start" } else { "stop" };
 
-                let service = ServiceController::new(self.config.service_scope);
+                let service = ServiceController::new(self.service_scope());
 
                 return Task::perform(service.action(action), |state| {
                     cosmic::Action::App(Message::ServiceActionFinished { state })
@@ -406,21 +493,29 @@ impl cosmic::Application for AppModel {
                             },
                         );
                     }
+
                     ServiceState::Stopped => {
                         self.service_enabled = false;
                         self.stats = TransmissionStats::default();
                     }
+
                     ServiceState::Error => {
                         self.stats = TransmissionStats::default();
                     }
+
                     ServiceState::Checking => {}
                 }
             }
 
             Message::OpenWebUi => {
-                tokio::spawn(async {
+                let url = format!(
+                    "http://{}:{}/transmission/web/",
+                    self.connection.host, self.connection.rpc_port
+                );
+
+                tokio::spawn(async move {
                     let _ = Command::new("xdg-open")
-                        .arg(WEB_UI)
+                        .arg(url)
                         .stdin(Stdio::null())
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
@@ -438,6 +533,23 @@ impl cosmic::Application for AppModel {
 }
 
 impl AppModel {
+    fn service_scope(&self) -> ServiceScope {
+        self.connection
+            .service_scope
+            .expect("service_scope is only used for local connections")
+    }
+
+    fn save_connections_config(&self) {
+        let Ok(config) = cosmic::cosmic_config::Config::new(
+            "io.github.cosmic.Transmission",
+            ConnectionsConfig::VERSION,
+        ) else {
+            return;
+        };
+
+        let _ = self.connections_config.write_entry(&config);
+    }
+
     fn panel_icon(&self) -> Element<'_, Message> {
         let transmission = widget::icon::from_name("transmission")
             .symbolic(false)
@@ -476,11 +588,24 @@ impl AppModel {
     }
 }
 
-async fn query_transmission(
+async fn query_connection(
     rpc_client: RpcClient,
     session_id: Option<String>,
-    service_scope: ServiceScope,
+    connection: Connection,
 ) -> (ServiceState, Option<TransmissionStats>, Option<String>) {
+    if connection.service_scope.is_none() {
+        let (stats, session_id) = query_stats(rpc_client, session_id).await;
+
+        return match stats {
+            Some(stats) => (ServiceState::Running, Some(stats), session_id),
+            None => (ServiceState::Error, None, session_id),
+        };
+    }
+
+    let service_scope = connection
+        .service_scope
+        .expect("local connection must have a service scope");
+
     let service = ServiceController::new(service_scope);
     let state = service.status().await;
 
@@ -490,12 +615,15 @@ async fn query_transmission(
 
             (ServiceState::Running, stats, session_id)
         }
+
         ServiceState::Stopped => (
             ServiceState::Stopped,
             Some(TransmissionStats::default()),
             session_id,
         ),
+
         ServiceState::Checking => (ServiceState::Checking, None, session_id),
+
         ServiceState::Error => (
             ServiceState::Error,
             Some(TransmissionStats::default()),
@@ -511,12 +639,12 @@ struct RpcClient {
 }
 
 impl RpcClient {
-    fn new(config: &ConnectionConfig) -> Self {
+    fn new(connection: &Connection) -> Self {
         Self {
             client: reqwest::Client::new(),
             url: format!(
                 "http://{}:{}/transmission/rpc",
-                config.host, config.rpc_port
+                connection.host, connection.rpc_port
             ),
         }
     }
