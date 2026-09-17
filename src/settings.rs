@@ -23,6 +23,7 @@ const DRAG_START_DISTANCE_SQUARED: f32 = 64.0;
 pub enum Message {
     SelectConnection(uuid::Uuid),
     PasswordLoaded(Option<String>),
+    TogglePasswordVisibility,
     AddConnection,
     DeleteConnection(uuid::Uuid),
     ReorderConnections(Vec<uuid::Uuid>),
@@ -44,6 +45,7 @@ pub struct SettingsModel {
     connections_config: ConnectionsConfig,
     selected_connection: uuid::Uuid,
     password: String,
+    password_hidden: bool,
     app_config: AppConfig,
 }
 
@@ -105,6 +107,7 @@ impl Application for SettingsModel {
                 selected_connection,
                 connections_config,
                 password: String::new(),
+                password_hidden: true,
                 app_config,
             },
             task,
@@ -135,6 +138,10 @@ impl Application for SettingsModel {
 
             Message::PasswordLoaded(password) => {
                 self.password = password.unwrap_or_default();
+            }
+
+            Message::TogglePasswordVisibility => {
+                self.password_hidden = !self.password_hidden;
             }
 
             Message::AddConnection => {
@@ -336,142 +343,174 @@ impl SettingsModel {
 
     fn settings_view(&self) -> Element<'_, Message> {
         let spacing = theme::active().cosmic().spacing;
-        let connection = self.selected_connection();
 
-        let connection_list = ConnectionReorderList::new(
-            self.connections_config.connections.clone(),
-            self.selected_connection,
-            self.connections_config.active_connection,
-            Message::SelectConnection,
-            Message::DeleteConnection,
-            Message::ReorderConnections,
-        );
+        let connection_section = widget::responsive(move |size| {
+            let connection_header = widget::row::with_children(vec![
+                widget::text::heading("Connections").into(),
+                widget::Space::new().width(Length::Fill).into(),
+                widget::button::standard("Add Connection")
+                    .on_press(Message::AddConnection)
+                    .into(),
+            ])
+            .align_y(Alignment::Center);
 
-        let selected_is_local = connection.service_scope.is_some();
+            let connection = self.selected_connection();
 
-        let name = if selected_is_local {
-            widget::settings::item(
-                "Name",
-                widget::text(connection.name.clone()).width(Length::Fixed(220.0)),
-            )
-        } else {
-            widget::settings::item(
-                "Name",
-                widget::text_input("", &connection.name)
-                    .on_input(Message::NameChanged)
-                    .width(Length::Fixed(220.0)),
-            )
-        };
+            let compact_navigation = size.width < 700.0;
 
-        let host = widget::settings::item(
-            "Host",
-            widget::text_input("localhost", &connection.host)
-                .on_input(Message::HostChanged)
-                .width(Length::Fixed(220.0)),
-        );
-
-        let username = if selected_is_local {
-            widget::settings::item(
-                "Username",
-                widget::text(connection.username.clone()).width(Length::Fixed(220.0)),
-            )
-        } else {
-            widget::settings::item(
-                "Username",
-                widget::text_input("Username", &connection.username)
-                    .on_input(Message::UsernameChanged)
-                    .width(Length::Fixed(220.0)),
-            )
-        };
-
-        let rpc_port = widget::settings::item(
-            "RPC port",
-            widget::text_input("9091", connection.rpc_port.to_string())
-                .on_input(Message::RpcPortChanged)
-                .width(Length::Fixed(120.0)),
-        );
-
-        let password = widget::settings::item(
-            "Password",
-            widget::text_input("Password", &self.password)
-                .on_input(Message::PasswordChanged)
-                .width(Length::Fixed(220.0)),
-        );
-
-        let is_active = connection.id == self.connections_config.active_connection;
-
-        let active_toggle = widget::toggler(is_active);
-
-        let active_toggle = if is_active {
-            active_toggle
-        } else {
-            active_toggle.on_toggle(|_| Message::SetActiveConnection)
-        };
-
-        let details = if selected_is_local {
-            let scope = widget::text(
-                connection
-                    .service_scope
-                    .expect("Local connection must have a service scope")
-                    .to_string(),
+            let connection_list = ConnectionReorderList::new(
+                self.connections_config.connections.clone(),
+                self.selected_connection,
+                self.connections_config.active_connection,
+                Message::SelectConnection,
+                Message::DeleteConnection,
+                Message::ReorderConnections,
+                compact_navigation,
             );
 
+            let selected_is_local = connection.service_scope.is_some();
+
+            let name = if selected_is_local {
+                widget::settings::item(
+                    "Name",
+                    widget::text(connection.name.clone()).width(Length::Fixed(220.0)),
+                )
+            } else {
+                widget::settings::item(
+                    "Name",
+                    widget::text_input("", &connection.name)
+                        .on_input(Message::NameChanged)
+                        .width(Length::Fixed(220.0)),
+                )
+            };
+
+            let host = widget::settings::item(
+                "Host",
+                if selected_is_local {
+                    widget::text_input("localhost", &connection.host).width(Length::Fixed(220.0))
+                } else {
+                    widget::text_input("localhost", &connection.host)
+                        .on_input(Message::HostChanged)
+                        .width(Length::Fixed(220.0))
+                },
+            );
+
+            let username = if selected_is_local {
+                widget::settings::item(
+                    "Username",
+                    widget::text_input("Username", &connection.username)
+                        .width(Length::Fixed(220.0)),
+                )
+            } else {
+                widget::settings::item(
+                    "Username",
+                    widget::text_input("Username", &connection.username)
+                        .on_input(Message::UsernameChanged)
+                        .width(Length::Fixed(220.0)),
+                )
+            };
+
+            let rpc_port = widget::settings::item(
+                "RPC port",
+                if selected_is_local {
+                    widget::text_input("9091", connection.rpc_port.to_string())
+                        .width(Length::Fixed(220.0))
+                } else {
+                    widget::text_input("9091", connection.rpc_port.to_string())
+                        .on_input(Message::RpcPortChanged)
+                        .width(Length::Fixed(220.0))
+                },
+            );
+
+            let password = widget::settings::item(
+                "Password",
+                widget::secure_input(
+                    "Password",
+                    &self.password,
+                    Some(Message::TogglePasswordVisibility),
+                    self.password_hidden,
+                )
+                .on_input(Message::PasswordChanged)
+                .width(Length::Fixed(220.0)),
+            );
+
+            let is_active = connection.id == self.connections_config.active_connection;
+
+            let active_toggle = widget::toggler(is_active);
+
+            let active_toggle = if is_active {
+                active_toggle
+            } else {
+                active_toggle.on_toggle(|_| Message::SetActiveConnection)
+            };
+
+            let details = if selected_is_local {
+                let scope = widget::text(
+                    connection
+                        .service_scope
+                        .expect("Local connection must have a service scope")
+                        .to_string(),
+                );
+
+                widget::column::with_children(vec![
+                    name.into(),
+                    host.into(),
+                    username.into(),
+                    rpc_port.into(),
+                    widget::settings::item("Scope", scope).into(),
+                    widget::settings::item("Active", active_toggle).into(),
+                ])
+                .spacing(spacing.space_s)
+            } else {
+                widget::column::with_children(vec![
+                    name.into(),
+                    host.into(),
+                    username.into(),
+                    rpc_port.into(),
+                    password.into(),
+                    widget::row::with_children(vec![
+                        widget::Space::new().width(Length::Fill).into(),
+                        widget::button::standard("Save password")
+                            .on_press(Message::SavePassword)
+                            .into(),
+                        widget::button::standard("Clear password")
+                            .on_press(Message::ClearPassword)
+                            .into(),
+                    ])
+                    .spacing(spacing.space_xxs)
+                    .into(),
+                    widget::settings::item("Active", active_toggle).into(),
+                ])
+                .spacing(spacing.space_s)
+            };
+
+            let navigation_width = if compact_navigation {
+                Length::Fixed(56.0)
+            } else {
+                Length::Fixed(320.0)
+            };
+
             widget::column::with_children(vec![
-                name.into(),
-                host.into(),
-                username.into(),
-                rpc_port.into(),
-                widget::settings::item("Scope", scope).into(),
-                widget::settings::item("Active", active_toggle).into(),
-            ])
-            .spacing(spacing.space_s)
-        } else {
-            widget::column::with_children(vec![
-                name.into(),
-                host.into(),
-                username.into(),
-                rpc_port.into(),
-                password.into(),
+                connection_header.into(),
                 widget::row::with_children(vec![
-                    widget::Space::new().width(Length::Fill).into(),
-                    widget::button::standard("Save password")
-                        .on_press(Message::SavePassword)
+                    widget::scrollable(connection_list)
+                        .width(navigation_width)
+                        .height(Length::Fill)
                         .into(),
-                    widget::button::standard("Clear password")
-                        .on_press(Message::ClearPassword)
+                    widget::divider::vertical::default().into(),
+                    widget::scrollable(details)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
                         .into(),
                 ])
-                .spacing(spacing.space_xxs)
+                .spacing(spacing.space_s)
+                .height(Length::Fill)
                 .into(),
-                widget::settings::item("Active", active_toggle).into(),
-            ])
-            .spacing(spacing.space_s)
-        };
-
-        let connection_header = widget::row::with_children(vec![
-            widget::text::heading("Connections").into(),
-            widget::Space::new().width(Length::Fill).into(),
-            widget::button::standard("Add Connection")
-                .on_press(Message::AddConnection)
-                .into(),
-        ])
-        .align_y(Alignment::Center);
-
-        let connection_section = widget::column::with_children(vec![
-            connection_header.into(),
-            widget::row::with_children(vec![
-                widget::scrollable(connection_list)
-                    .width(Length::Fixed(220.0))
-                    .height(Length::Fill)
-                    .into(),
-                widget::divider::vertical::default().into(),
-                details.width(Length::Fill).into(),
             ])
             .spacing(spacing.space_s)
             .height(Length::Fill)
-            .into(),
-        ])
-        .spacing(spacing.space_s)
+            .into()
+        })
         .height(Length::Fill);
 
         let poll_interval = widget::settings::item(
@@ -556,10 +595,13 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
         on_select: impl Fn(uuid::Uuid) -> Message + 'a,
         on_delete: impl Fn(uuid::Uuid) -> Message + 'a,
         on_reorder: impl Fn(Vec<uuid::Uuid>) -> Message + 'a,
+        compact: bool,
     ) -> Self {
         let rows = connections
             .iter()
-            .map(|connection| Self::connection_row(connection, selected, active, &on_delete))
+            .map(|connection| {
+                Self::connection_row(connection, selected, active, &on_delete, compact)
+            })
             .collect();
 
         Self {
@@ -576,8 +618,43 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
         selected: uuid::Uuid,
         active: uuid::Uuid,
         on_delete: &dyn Fn(uuid::Uuid) -> Message,
+        compact: bool,
     ) -> Element<'a, Message> {
         let spacing = theme::active().cosmic().spacing;
+
+        if compact {
+            let icon_name = if connection.service_scope.is_some() {
+                "computer-symbolic"
+            } else {
+                "network-server-symbolic"
+            };
+
+            let icon = widget::icon::from_name(icon_name).symbolic(true).size(20);
+
+            let icon = widget::tooltip(
+                icon,
+                widget::text(connection.name.clone()),
+                widget::tooltip::Position::Right,
+            );
+
+            let content = widget::row::with_children(vec![
+                widget::Space::new().width(Length::Fill).into(),
+                icon.into(),
+                widget::Space::new().width(Length::Fill).into(),
+            ])
+            .align_y(Alignment::Center)
+            .height(Length::Fill);
+
+            return widget::container(content)
+                .padding(8)
+                .width(Length::Fill)
+                .class(if connection.id == selected {
+                    theme::Container::Primary
+                } else {
+                    theme::Container::Primary
+                })
+                .into();
+        }
 
         let label = if connection.id == active {
             format!("{}  •", connection.name)
@@ -604,10 +681,20 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
             )
         };
 
+        let icon_name = if connection.service_scope.is_some() {
+            "computer-symbolic"
+        } else {
+            "network-server-symbolic"
+        };
+
         let mut children = vec![
             widget::icon::from_name("list-drag-handle-symbolic")
                 .symbolic(true)
                 .size(16)
+                .into(),
+            widget::icon::from_name(icon_name)
+                .symbolic(true)
+                .size(20)
                 .into(),
             widget::column::with_children(vec![
                 widget::text(label).into(),
