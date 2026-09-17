@@ -6,8 +6,7 @@ use cosmic::{
 };
 
 use crate::config::{
-    AppConfig, Connection, ConnectionsConfig, LOCAL_SYSTEM_ID, LOCAL_USER_ID, PollInterval,
-    ServiceScope,
+    Connection, ConnectionsConfig, LOCAL_SYSTEM_ID, LOCAL_USER_ID, PollInterval, ServiceScope,
 };
 use crate::credentials;
 use cosmic_config::CosmicConfigEntry;
@@ -46,7 +45,6 @@ pub struct SettingsModel {
     selected_connection: uuid::Uuid,
     password: String,
     password_hidden: bool,
-    app_config: AppConfig,
 }
 
 impl Application for SettingsModel {
@@ -78,12 +76,6 @@ impl Application for SettingsModel {
         .map(|config| ConnectionsConfig::get_entry(&config).unwrap_or_else(|(_, config)| config))
         .unwrap_or_default();
 
-        let app_config =
-            cosmic::cosmic_config::Config::new("io.github.cosmic.Transmission", AppConfig::VERSION)
-                .ok()
-                .map(|config| AppConfig::get_entry(&config).unwrap_or_else(|(_, config)| config))
-                .unwrap_or_default();
-
         let selected_connection = std::env::args()
             .skip_while(|arg| arg != "--connection")
             .nth(1)
@@ -108,7 +100,6 @@ impl Application for SettingsModel {
                 connections_config,
                 password: String::new(),
                 password_hidden: true,
-                app_config,
             },
             task,
         )
@@ -154,6 +145,7 @@ impl Application for SettingsModel {
                     rpc_port: 9091,
                     username: String::new(),
                     service_scope: None,
+                    poll_interval: PollInterval::default(),
                 });
 
                 self.selected_connection = id;
@@ -304,7 +296,9 @@ impl Application for SettingsModel {
             }
 
             Message::PollIntervalChanged(interval) => {
-                self.app_config.poll_interval = interval;
+                if let Some(connection) = self.selected_connection_mut() {
+                    connection.poll_interval = interval;
+                }
             }
 
             Message::Close => {
@@ -422,6 +416,22 @@ impl SettingsModel {
                 },
             );
 
+            let poll_interval = widget::settings::item(
+                "Polling interval",
+                cosmic::iced::widget::pick_list(
+                    [
+                        PollInterval::OneSecond,
+                        PollInterval::TwoSeconds,
+                        PollInterval::FiveSeconds,
+                        PollInterval::TenSeconds,
+                        PollInterval::ThirtySeconds,
+                    ],
+                    Some(connection.poll_interval),
+                    Message::PollIntervalChanged,
+                )
+                .width(Length::Fixed(140.0)),
+            );
+
             let password = widget::settings::item(
                 "Password",
                 widget::secure_input(
@@ -458,6 +468,7 @@ impl SettingsModel {
                     username.into(),
                     rpc_port.into(),
                     widget::settings::item("Scope", scope).into(),
+                    poll_interval.into(),
                     widget::settings::item("Active", active_toggle).into(),
                 ])
                 .spacing(spacing.space_s)
@@ -479,6 +490,7 @@ impl SettingsModel {
                     ])
                     .spacing(spacing.space_xxs)
                     .into(),
+                    poll_interval.into(),
                     widget::settings::item("Active", active_toggle).into(),
                 ])
                 .spacing(spacing.space_s)
@@ -513,30 +525,9 @@ impl SettingsModel {
         })
         .height(Length::Fill);
 
-        let poll_interval = widget::settings::item(
-            "Polling interval",
-            cosmic::iced::widget::pick_list(
-                [
-                    PollInterval::OneSecond,
-                    PollInterval::TwoSeconds,
-                    PollInterval::FiveSeconds,
-                    PollInterval::TenSeconds,
-                    PollInterval::ThirtySeconds,
-                ],
-                Some(self.app_config.poll_interval),
-                Message::PollIntervalChanged,
-            )
-            .width(Length::Fixed(140.0)),
-        );
-
-        let updates_section = widget::settings::section()
-            .title("Updates")
-            .add(poll_interval);
-
-        let settings =
-            widget::column::with_children(vec![connection_section.into(), updates_section.into()])
-                .spacing(spacing.space_l)
-                .height(Length::Fill);
+        let settings = widget::column::with_children(vec![connection_section.into()])
+            .spacing(spacing.space_l)
+            .height(Length::Fill);
 
         let content = widget::container(settings)
             .class(theme::Container::WindowBackground)
@@ -560,14 +551,6 @@ impl SettingsModel {
         };
 
         let _ = self.connections_config.write_entry(&config);
-
-        let Ok(app_config) =
-            cosmic::cosmic_config::Config::new("io.github.cosmic.Transmission", AppConfig::VERSION)
-        else {
-            return;
-        };
-
-        let _ = self.app_config.write_entry(&app_config);
     }
 }
 

@@ -39,25 +39,12 @@ impl std::fmt::Display for PollInterval {
     }
 }
 
-#[derive(Clone, cosmic_config::cosmic_config_derive::CosmicConfigEntry, Debug, Eq, PartialEq)]
-#[version = 1]
-pub struct AppConfig {
-    pub poll_interval: PollInterval,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            poll_interval: PollInterval::default(),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ServiceScope {
     User,
     System,
 }
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Connection {
     pub id: uuid::Uuid,
@@ -66,12 +53,15 @@ pub struct Connection {
     pub rpc_port: u16,
     pub username: String,
     pub service_scope: Option<ServiceScope>,
+    pub poll_interval: PollInterval,
 }
+
 impl std::fmt::Display for Connection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.name)
     }
 }
+
 pub const LOCAL_USER_ID: uuid::Uuid = uuid::uuid!("00000000-0000-4000-8000-000000000001");
 
 pub const LOCAL_SYSTEM_ID: uuid::Uuid = uuid::uuid!("00000000-0000-4000-8000-000000000002");
@@ -85,6 +75,7 @@ pub fn local_connections() -> [Connection; 2] {
             rpc_port: 9091,
             username: String::new(),
             service_scope: Some(ServiceScope::User),
+            poll_interval: PollInterval::default(),
         },
         Connection {
             id: LOCAL_SYSTEM_ID,
@@ -93,9 +84,11 @@ pub fn local_connections() -> [Connection; 2] {
             rpc_port: 9091,
             username: String::new(),
             service_scope: Some(ServiceScope::System),
+            poll_interval: PollInterval::default(),
         },
     ]
 }
+
 #[derive(Clone, cosmic_config::cosmic_config_derive::CosmicConfigEntry, Debug, Eq, PartialEq)]
 #[version = 1]
 pub struct ConnectionsConfig {
@@ -113,7 +106,6 @@ impl Default for ConnectionsConfig {
         }
     }
 }
-impl ConnectionsConfig {}
 
 impl std::fmt::Display for ServiceScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

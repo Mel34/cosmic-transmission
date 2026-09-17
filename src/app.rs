@@ -1,7 +1,7 @@
 use std::process::Stdio;
 
 use cosmic_config::CosmicConfigEntry;
-use cosmic_transmission::config::{AppConfig, Connection, ConnectionsConfig, ServiceScope};
+use cosmic_transmission::config::{Connection, ConnectionsConfig, ServiceScope};
 use cosmic_transmission::credentials;
 use cosmic_transmission::service::{ServiceController, ServiceState};
 
@@ -80,7 +80,6 @@ pub struct AppModel {
     rpc_client: RpcClient,
     rpc_session_id: Option<String>,
     token_tx: Option<calloop::channel::Sender<TokenRequest>>,
-    app_config: AppConfig,
 }
 
 impl Default for AppModel {
@@ -104,7 +103,6 @@ impl Default for AppModel {
             connection,
             rpc_session_id: None,
             token_tx: None,
-            app_config: AppConfig::default(),
         }
     }
 }
@@ -143,18 +141,12 @@ impl cosmic::Application for AppModel {
             .cloned()
             .unwrap_or_else(|| connections_config.connections[0].clone());
 
-        let app_config = cosmic::cosmic_config::Config::new(Self::APP_ID, AppConfig::VERSION)
-            .ok()
-            .map(|config| AppConfig::get_entry(&config).unwrap_or_else(|(_, config)| config))
-            .unwrap_or_default();
-
         let rpc_client = RpcClient::new(&connection);
 
         let mut app = Self {
             core,
             connections_config,
             connection,
-            app_config,
             ..Default::default()
         };
 
@@ -293,7 +285,7 @@ impl cosmic::Application for AppModel {
     fn subscription(&self) -> Subscription<Self::Message> {
         Subscription::batch([
             activation_token_subscription(0).map(Message::Token),
-            cosmic::iced::time::every(self.app_config.poll_interval.duration())
+            cosmic::iced::time::every(self.connection.poll_interval.duration())
                 .map(|_| Message::Refresh),
         ])
     }
@@ -328,36 +320,20 @@ impl cosmic::Application for AppModel {
                     return destroy_popup(popup);
                 }
 
-                let old_active_connection = self.connections_config.active_connection;
-
                 self.connections_config = AppModel::load_connections_config();
-
-                let active_changed =
-                    self.connections_config.active_connection != old_active_connection;
-
-                let current_connection_exists = self
-                    .connections_config
-                    .connections
-                    .iter()
-                    .any(|connection| connection.id == self.connection.id);
-
-                let connection_id = if active_changed || !current_connection_exists {
-                    self.connections_config.active_connection
-                } else {
-                    self.connection.id
-                };
 
                 let Some(connection) = self
                     .connections_config
                     .connections
                     .iter()
-                    .find(|connection| connection.id == connection_id)
+                    .find(|connection| connection.id == self.connections_config.active_connection)
                     .cloned()
                 else {
                     return Task::none();
                 };
 
-                let connection_changed = connection.id != self.connection.id;
+                let connection_changed = connection.id != self.connection.id
+                    || connection.poll_interval != self.connection.poll_interval;
 
                 self.connection = connection.clone();
                 self.rpc_client = RpcClient::new(&connection);
@@ -430,8 +406,9 @@ impl cosmic::Application for AppModel {
             }
 
             Message::SelectConnection(id) => {
-                let Some(connection) = self
-                    .connections_config
+                let mut connections_config = Self::load_connections_config();
+
+                let Some(connection) = connections_config
                     .connections
                     .iter()
                     .find(|connection| connection.id == id)
@@ -440,7 +417,8 @@ impl cosmic::Application for AppModel {
                     return Task::none();
                 };
 
-                self.connections_config.active_connection = id;
+                connections_config.active_connection = id;
+                self.connections_config = connections_config;
                 self.connection = connection;
                 self.rpc_client = RpcClient::new(&self.connection);
                 self.rpc_session_id = None;
