@@ -64,6 +64,7 @@ pub struct Connection {
     pub name: String,
     pub host: String,
     pub rpc_port: u16,
+    pub username: String,
     pub service_scope: Option<ServiceScope>,
 }
 impl std::fmt::Display for Connection {
@@ -82,6 +83,7 @@ pub fn local_connections() -> [Connection; 2] {
             name: "Local User".to_string(),
             host: "localhost".to_string(),
             rpc_port: 9091,
+            username: String::new(),
             service_scope: Some(ServiceScope::User),
         },
         Connection {
@@ -89,6 +91,7 @@ pub fn local_connections() -> [Connection; 2] {
             name: "Local System".to_string(),
             host: "localhost".to_string(),
             rpc_port: 9091,
+            username: String::new(),
             service_scope: Some(ServiceScope::System),
         },
     ]

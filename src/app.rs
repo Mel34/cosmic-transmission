@@ -2,6 +2,7 @@ use std::process::Stdio;
 
 use cosmic_config::CosmicConfigEntry;
 use cosmic_transmission::config::{AppConfig, Connection, ConnectionsConfig, ServiceScope};
+use cosmic_transmission::credentials;
 use cosmic_transmission::service::{ServiceController, ServiceState};
 
 use cosmic::{
@@ -327,6 +328,47 @@ impl cosmic::Application for AppModel {
                     return destroy_popup(popup);
                 }
 
+                let old_active_connection = self.connections_config.active_connection;
+
+                self.connections_config = AppModel::load_connections_config();
+
+                let active_changed =
+                    self.connections_config.active_connection != old_active_connection;
+
+                let current_connection_exists = self
+                    .connections_config
+                    .connections
+                    .iter()
+                    .any(|connection| connection.id == self.connection.id);
+
+                let connection_id = if active_changed || !current_connection_exists {
+                    self.connections_config.active_connection
+                } else {
+                    self.connection.id
+                };
+
+                let Some(connection) = self
+                    .connections_config
+                    .connections
+                    .iter()
+                    .find(|connection| connection.id == connection_id)
+                    .cloned()
+                else {
+                    return Task::none();
+                };
+
+                let connection_changed = connection.id != self.connection.id;
+
+                self.connection = connection.clone();
+                self.rpc_client = RpcClient::new(&connection);
+
+                if connection_changed {
+                    self.rpc_session_id = None;
+                    self.stats = TransmissionStats::default();
+                    self.service_enabled = false;
+                    self.state = ServiceState::Checking;
+                }
+
                 let new_id = Id::unique();
                 self.popup = Some(new_id);
 
@@ -344,7 +386,27 @@ impl cosmic::Application for AppModel {
                     .min_height(100.0)
                     .max_height(400.0);
 
-                return get_popup(settings);
+                let popup_task = get_popup(settings);
+
+                if connection_changed {
+                    let rpc_client = self.rpc_client.clone();
+                    let connection = self.connection.clone();
+
+                    let query_task = Task::perform(
+                        query_connection(rpc_client, None, connection),
+                        |(state, stats, rpc_session_id)| {
+                            cosmic::Action::App(Message::StatusChecked {
+                                state,
+                                stats,
+                                rpc_session_id,
+                            })
+                        },
+                    );
+
+                    return Task::batch([popup_task, query_task]);
+                }
+
+                return popup_task;
             }
 
             Message::PopupClosed(id) => {
@@ -354,7 +416,10 @@ impl cosmic::Application for AppModel {
             }
 
             Message::OpenSettings => {
-                let exec = "cosmic-transmission-settings".to_string();
+                let exec = format!(
+                    "cosmic-transmission-settings --connection {}",
+                    self.connection.id
+                );
 
                 if let Some(tx) = self.token_tx.as_ref() {
                     let _ = tx.send(TokenRequest {
@@ -381,13 +446,8 @@ impl cosmic::Application for AppModel {
                 self.rpc_session_id = None;
                 self.stats = TransmissionStats::default();
 
-                if self.connection.service_scope.is_none() {
-                    self.service_enabled = false;
-                    self.state = ServiceState::Checking;
-                } else {
-                    self.service_enabled = false;
-                    self.state = ServiceState::Checking;
-                }
+                self.service_enabled = false;
+                self.state = ServiceState::Checking;
 
                 self.save_connections_config();
 
@@ -550,6 +610,16 @@ impl AppModel {
         let _ = self.connections_config.write_entry(&config);
     }
 
+    fn load_connections_config() -> ConnectionsConfig {
+        cosmic::cosmic_config::Config::new(
+            "io.github.cosmic.Transmission",
+            ConnectionsConfig::VERSION,
+        )
+        .ok()
+        .map(|config| ConnectionsConfig::get_entry(&config).unwrap_or_else(|(_, config)| config))
+        .unwrap_or_default()
+    }
+
     fn panel_icon(&self) -> Element<'_, Message> {
         let transmission = widget::icon::from_name("transmission")
             .symbolic(false)
@@ -636,6 +706,8 @@ async fn query_connection(
 struct RpcClient {
     client: reqwest::Client,
     url: String,
+    connection_id: uuid::Uuid,
+    username: Option<String>,
 }
 
 impl RpcClient {
@@ -646,6 +718,12 @@ impl RpcClient {
                 "http://{}:{}/transmission/rpc",
                 connection.host, connection.rpc_port
             ),
+            connection_id: connection.id,
+            username: if connection.username.is_empty() {
+                None
+            } else {
+                Some(connection.username.clone())
+            },
         }
     }
 }
@@ -692,7 +770,17 @@ async fn query_stats(
         },
     };
 
+    let password = if rpc_client.username.is_some() {
+        credentials::get_password(rpc_client.connection_id).await
+    } else {
+        None
+    };
+
     let mut request_builder = rpc_client.client.post(&rpc_client.url).json(&request);
+
+    if let Some(username) = rpc_client.username.as_deref() {
+        request_builder = request_builder.basic_auth(username, password.as_deref());
+    }
 
     if let Some(session_id) = session_id.as_deref() {
         request_builder = request_builder.header("X-Transmission-Session-Id", session_id);
@@ -719,14 +807,17 @@ async fn query_stats(
             return (None, None);
         };
 
-        let response = match rpc_client
+        let mut retry_request = rpc_client
             .client
             .post(&rpc_client.url)
             .header("X-Transmission-Session-Id", &new_session_id)
-            .json(&request)
-            .send()
-            .await
-        {
+            .json(&request);
+
+        if let Some(username) = rpc_client.username.as_deref() {
+            retry_request = retry_request.basic_auth(username, password.as_deref());
+        }
+
+        let response = match retry_request.send().await {
             Ok(response) => response,
             Err(_) => return (None, Some(new_session_id)),
         };

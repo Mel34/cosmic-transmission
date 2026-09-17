@@ -7,6 +7,7 @@ description = "COSMIC applet for controlling Transmission"
 
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+secret-service = { version = "5.2", default-features = false, features = ["rt-tokio-crypto-rust"] }
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 tokio = { version = "1", features = ["process", "time"] }

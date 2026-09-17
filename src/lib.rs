@@ -1,4 +1,4 @@
 pub mod config;
-//pub mod rpc;
+pub mod credentials;
 pub mod service;
 pub mod settings;
