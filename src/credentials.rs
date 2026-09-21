@@ -1,9 +1,10 @@
+use secrecy::{ExposeSecret, SecretString};
 use secret_service::{EncryptionType, SecretService};
 use std::collections::HashMap;
 
 const APPLICATION: &str = "io.github.cosmic.Transmission";
 
-pub async fn get_password(connection_id: uuid::Uuid) -> Option<String> {
+pub async fn get_password(connection_id: uuid::Uuid) -> Option<SecretString> {
     let service = SecretService::connect(EncryptionType::Dh).await.ok()?;
 
     let connection_id = connection_id.to_string();
@@ -26,10 +27,12 @@ pub async fn get_password(connection_id: uuid::Uuid) -> Option<String> {
 
     let secret = item.get_secret().await.ok()?;
 
-    String::from_utf8(secret).ok()
+    String::from_utf8(secret)
+        .ok()
+        .map(|password| SecretString::new(password.into_boxed_str()))
 }
 
-pub async fn set_password(connection_id: uuid::Uuid, password: String) -> bool {
+pub async fn set_password(connection_id: uuid::Uuid, password: SecretString) -> bool {
     let service = match SecretService::connect(EncryptionType::Dh).await {
         Ok(service) => service,
         Err(_) => return false,
@@ -51,7 +54,7 @@ pub async fn set_password(connection_id: uuid::Uuid, password: String) -> bool {
         .create_item(
             "Transmission connection password",
             properties,
-            password.as_bytes(),
+            password.expose_secret().as_bytes(),
             true,
             "text/plain",
         )

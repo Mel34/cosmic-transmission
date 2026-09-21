@@ -1,9 +1,9 @@
-use std::process::Stdio;
+use std::{process::Stdio, time::Duration};
 
 use cosmic_config::CosmicConfigEntry;
 use cosmic_transmission::config::{Connection, ConnectionsConfig, ServiceScope};
 use cosmic_transmission::credentials;
-use cosmic_transmission::service::{ServiceController, ServiceState};
+use cosmic_transmission::service::{ServiceAction, ServiceController, ServiceState};
 
 use cosmic::{
     applet::{menu_button, padded_control},
@@ -19,6 +19,8 @@ use cosmic::{
     applet::token::subscription::{TokenRequest, TokenUpdate, activation_token_subscription},
     cctk::sctk::reexports::calloop,
 };
+
+use secrecy::ExposeSecret;
 
 use tokio::process::Command;
 
@@ -310,7 +312,9 @@ impl cosmic::Application for AppModel {
                     }
 
                     tokio::spawn(async move {
-                        let _ = cmd.status().await;
+                        if let Err(error) = cmd.status().await {
+                            tracing::warn!(%error, "failed to launch Transmission settings");
+                        }
                     });
                 }
             },
@@ -501,7 +505,11 @@ impl cosmic::Application for AppModel {
                 self.service_enabled = enabled;
                 self.state = ServiceState::Checking;
 
-                let action = if enabled { "start" } else { "stop" };
+                let action = if enabled {
+                    ServiceAction::Start
+                } else {
+                    ServiceAction::Stop
+                };
 
                 let service = ServiceController::new(self.service_scope());
 
@@ -552,12 +560,15 @@ impl cosmic::Application for AppModel {
                 );
 
                 tokio::spawn(async move {
-                    let _ = Command::new("xdg-open")
+                    if let Err(error) = Command::new("xdg-open")
                         .arg(url)
                         .stdin(Stdio::null())
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
-                        .spawn();
+                        .spawn()
+                    {
+                        tracing::warn!(%error, "failed to launch Transmission Web UI");
+                    }
                 });
             }
         }
@@ -690,8 +701,13 @@ struct RpcClient {
 
 impl RpcClient {
     fn new(connection: &Connection) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("failed to build RPC HTTP client");
+
         Self {
-            client: reqwest::Client::new(),
+            client,
             url: format!(
                 "http://{}:{}/transmission/rpc",
                 connection.host, connection.rpc_port
@@ -757,7 +773,10 @@ async fn query_stats(
     let mut request_builder = rpc_client.client.post(&rpc_client.url).json(&request);
 
     if let Some(username) = rpc_client.username.as_deref() {
-        request_builder = request_builder.basic_auth(username, password.as_deref());
+        request_builder = request_builder.basic_auth(
+            username,
+            password.as_ref().map(|password| password.expose_secret()),
+        );
     }
 
     if let Some(session_id) = session_id.as_deref() {
@@ -766,7 +785,10 @@ async fn query_stats(
 
     let response = match request_builder.send().await {
         Ok(response) => response,
-        Err(_) => return (None, session_id),
+        Err(error) => {
+            tracing::warn!(%error, "Transmission RPC request failed");
+            return (None, session_id);
+        }
     };
 
     if response.status().is_success() {
@@ -782,6 +804,7 @@ async fn query_stats(
             .map(str::to_owned);
 
         let Some(new_session_id) = new_session_id else {
+            tracing::warn!("Transmission RPC response did not include a session ID");
             return (None, None);
         };
 
@@ -792,12 +815,18 @@ async fn query_stats(
             .json(&request);
 
         if let Some(username) = rpc_client.username.as_deref() {
-            retry_request = retry_request.basic_auth(username, password.as_deref());
+            retry_request = retry_request.basic_auth(
+                username,
+                password.as_ref().map(|password| password.expose_secret()),
+            );
         }
 
         let response = match retry_request.send().await {
             Ok(response) => response,
-            Err(_) => return (None, Some(new_session_id)),
+            Err(error) => {
+                tracing::warn!(%error, "Transmission RPC retry failed");
+                return (None, Some(new_session_id));
+            }
         };
 
         let stats = parse_rpc_response(response).await;
@@ -810,10 +839,14 @@ async fn query_stats(
 async fn parse_rpc_response(response: reqwest::Response) -> TransmissionStats {
     let response: RpcResponse = match response.json().await {
         Ok(response) => response,
-        Err(_) => return TransmissionStats::default(),
+        Err(error) => {
+            tracing::warn!(%error, "failed to parse Transmission RPC response");
+            return TransmissionStats::default();
+        }
     };
 
     if response.result != "success" {
+        tracing::warn!(result = %response.result, "Transmission RPC returned an error");
         return TransmissionStats::default();
     }
 

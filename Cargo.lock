@@ -1102,9 +1102,11 @@ dependencies = [
  "cosmic-config",
  "libcosmic",
  "reqwest",
+ "secrecy",
  "secret-service",
  "serde",
  "tokio",
+ "tracing",
  "uuid",
  "zbus",
 ]
@@ -4636,6 +4638,15 @@ dependencies = [
  "memmap2 0.9.11",
  "smithay-client-toolkit",
  "tiny-skia 0.12.0",
+]
+
+[[package]]
+name = "secrecy"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
+dependencies = [
+ "zeroize",
 ]
 
 [[package]]

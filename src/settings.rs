@@ -10,6 +10,7 @@ use crate::config::{
 };
 use crate::credentials;
 use cosmic_config::CosmicConfigEntry;
+use secrecy::{ExposeSecret, SecretString};
 
 use cosmic::iced::advanced::Renderer;
 use cosmic::iced::core::widget::{Operation, Tree, tree};
@@ -21,7 +22,7 @@ const DRAG_START_DISTANCE_SQUARED: f32 = 64.0;
 #[derive(Debug, Clone)]
 pub enum Message {
     SelectConnection(uuid::Uuid),
-    PasswordLoaded(Option<String>),
+    PasswordLoaded(Option<SecretString>),
     TogglePasswordVisibility,
     AddConnection,
     DeleteConnection(uuid::Uuid),
@@ -43,7 +44,7 @@ pub struct SettingsModel {
     core: cosmic::Core,
     connections_config: ConnectionsConfig,
     selected_connection: uuid::Uuid,
-    password: String,
+    password: SecretString,
     password_hidden: bool,
 }
 
@@ -98,7 +99,7 @@ impl Application for SettingsModel {
                 core,
                 selected_connection,
                 connections_config,
-                password: String::new(),
+                password: SecretString::new(String::new().into()),
                 password_hidden: true,
             },
             task,
@@ -119,7 +120,7 @@ impl Application for SettingsModel {
                     .any(|connection| connection.id == id)
                 {
                     self.selected_connection = id;
-                    self.password.clear();
+                    self.password = SecretString::new(String::new().into());
 
                     return cosmic::Task::perform(credentials::get_password(id), |password| {
                         cosmic::Action::App(Message::PasswordLoaded(password))
@@ -149,7 +150,7 @@ impl Application for SettingsModel {
                 });
 
                 self.selected_connection = id;
-                self.password.clear();
+                self.password = SecretString::new(String::new().into());
             }
 
             Message::DeleteConnection(id) => {
@@ -171,7 +172,7 @@ impl Application for SettingsModel {
 
                     if self.selected_connection == id {
                         self.selected_connection = self.connections_config.active_connection;
-                        self.password.clear();
+                        self.password = SecretString::new(String::new().into());
 
                         return cosmic::Task::perform(credentials::delete_password(id), |_| {
                             cosmic::Action::App(Message::PasswordLoaded(None))
@@ -251,13 +252,13 @@ impl Application for SettingsModel {
             }
 
             Message::PasswordChanged(password) => {
-                self.password = password;
+                self.password = SecretString::new(password.into());
             }
 
             Message::SavePassword => {
                 let id = self.selected_connection;
 
-                if !self.password.is_empty() {
+                if !self.password.expose_secret().is_empty() {
                     let password = self.password.clone();
 
                     return cosmic::Task::perform(credentials::set_password(id, password), |_| {
@@ -268,7 +269,7 @@ impl Application for SettingsModel {
 
             Message::ClearPassword => {
                 let id = self.selected_connection;
-                self.password.clear();
+                self.password = SecretString::new(String::new().into());
 
                 return cosmic::Task::perform(credentials::delete_password(id), |_| {
                     cosmic::Action::App(Message::PasswordLoaded(None))
@@ -442,7 +443,7 @@ impl SettingsModel {
                 "Password",
                 widget::secure_input(
                     "Password",
-                    &self.password,
+                    self.password.expose_secret(),
                     Some(Message::TogglePasswordVisibility),
                     self.password_hidden,
                 )
