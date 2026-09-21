@@ -17,6 +17,9 @@ tracing = "0.1"
 zbus = { version = "5.15", default-features = false, features = ["tokio"] }
 cosmic-config = { git = "https://github.com/pop-os/libcosmic.git", rev = "7e82198ab1aba712640b0167e58ad37bf03012ca", package = "cosmic-config", features = ["dbus", "tokio"] }
 
+[dev-dependencies]
+serde_json = "1"
+
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic.git"
 rev = "7e82198ab1aba712640b0167e58ad37bf03012ca"

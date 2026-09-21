@@ -45,6 +45,23 @@ impl ServiceController {
         service_action(&connection, action).await
     }
 
+    pub async fn username(self) -> Option<String> {
+        match self.scope {
+            ServiceScope::User => std::env::var("USER").ok(),
+            ServiceScope::System => {
+                let connection = match self.connection().await {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        tracing::error!(?self.scope, %error, "failed to connect to systemd");
+                        return None;
+                    }
+                };
+
+                service_username(&connection).await
+            }
+        }
+    }
+
     async fn connection(self) -> zbus::Result<zbus::Connection> {
         match self.scope {
             ServiceScope::User => zbus::Connection::session().await,
@@ -89,6 +106,15 @@ trait SystemdUnit {
     fn active_state(&self) -> zbus::Result<String>;
 }
 
+#[zbus::proxy(
+    interface = "org.freedesktop.systemd1.Service",
+    default_service = "org.freedesktop.systemd1"
+)]
+trait SystemdService {
+    #[zbus(property)]
+    fn user(&self) -> zbus::Result<String>;
+}
+
 async fn service_status(connection: &zbus::Connection) -> ServiceState {
     let Ok(manager) = SystemdManagerProxy::new(connection).await else {
         tracing::error!("failed to create systemd manager proxy");
@@ -110,17 +136,67 @@ async fn service_status(connection: &zbus::Connection) -> ServiceState {
     };
 
     match unit.active_state().await {
-        Ok(state) => match state.as_str() {
-            "active" => ServiceState::Running,
-            "activating" | "deactivating" | "reloading" => ServiceState::Checking,
-            "inactive" | "failed" => ServiceState::Stopped,
-            other => {
-                tracing::warn!(active_state = other, "unknown systemd service state");
-                ServiceState::Error
-            }
-        },
+        Ok(state) => service_state_from_active_state(&state),
         Err(error) => {
             tracing::error!(%error, "failed to query systemd service state");
+            ServiceState::Error
+        }
+    }
+}
+
+async fn service_username(connection: &zbus::Connection) -> Option<String> {
+    let manager = match SystemdManagerProxy::new(connection).await {
+        Ok(manager) => manager,
+        Err(error) => {
+            tracing::error!(%error, "failed to create systemd manager proxy");
+            return None;
+        }
+    };
+
+    let unit_path = match manager.get_unit(SERVICE).await {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::error!(%error, "failed to find transmission service");
+            return None;
+        }
+    };
+
+    let builder = match SystemdServiceProxy::builder(connection).path(unit_path) {
+        Ok(builder) => builder,
+        Err(error) => {
+            tracing::error!(%error, "failed to create systemd service proxy builder");
+            return None;
+        }
+    };
+
+    let service = match builder.build().await {
+        Ok(service) => service,
+        Err(error) => {
+            tracing::error!(%error, "failed to build systemd service proxy");
+            return None;
+        }
+    };
+
+    match service.user().await {
+        Ok(username) if !username.is_empty() => Some(username),
+        Ok(_) => {
+            tracing::warn!("systemd service user is empty");
+            None
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to query systemd service user");
+            None
+        }
+    }
+}
+
+fn service_state_from_active_state(state: &str) -> ServiceState {
+    match state {
+        "active" => ServiceState::Running,
+        "activating" | "deactivating" | "reloading" => ServiceState::Checking,
+        "inactive" | "failed" => ServiceState::Stopped,
+        other => {
+            tracing::warn!(active_state = other, "unknown systemd service state");
             ServiceState::Error
         }
     }
@@ -144,5 +220,46 @@ async fn service_action(connection: &zbus::Connection, action: ServiceAction) ->
             tracing::error!(?action, %error, "systemd service action failed");
             ServiceState::Error
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_state_from_active_state_returns_running() {
+        assert_eq!(
+            service_state_from_active_state("active"),
+            ServiceState::Running
+        );
+    }
+
+    #[test]
+    fn service_state_from_active_state_returns_checking() {
+        for state in ["activating", "deactivating", "reloading"] {
+            assert_eq!(
+                service_state_from_active_state(state),
+                ServiceState::Checking
+            );
+        }
+    }
+
+    #[test]
+    fn service_state_from_active_state_returns_stopped() {
+        for state in ["inactive", "failed"] {
+            assert_eq!(
+                service_state_from_active_state(state),
+                ServiceState::Stopped
+            );
+        }
+    }
+
+    #[test]
+    fn service_state_from_active_state_returns_error_for_unknown_state() {
+        assert_eq!(
+            service_state_from_active_state("unknown"),
+            ServiceState::Error
+        );
     }
 }

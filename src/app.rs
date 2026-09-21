@@ -1,8 +1,10 @@
-use std::{process::Stdio, time::Duration};
+use std::process::Stdio;
 
 use cosmic_config::CosmicConfigEntry;
 use cosmic_transmission::config::{Connection, ConnectionsConfig, ServiceScope};
-use cosmic_transmission::credentials;
+use cosmic_transmission::rpc::{
+    RpcClient, TransmissionStats, format_speed, query_connection, query_stats,
+};
 use cosmic_transmission::service::{ServiceAction, ServiceController, ServiceState};
 
 use cosmic::{
@@ -19,8 +21,6 @@ use cosmic::{
     applet::token::subscription::{TokenRequest, TokenUpdate, activation_token_subscription},
     cctk::sctk::reexports::calloop,
 };
-
-use secrecy::ExposeSecret;
 
 use tokio::process::Command;
 
@@ -41,15 +41,6 @@ const STATUS_ERROR_SVG: &[u8] = br#"
   />
 </svg>
 "#;
-
-#[derive(Debug, Clone, Default)]
-pub struct TransmissionStats {
-    active: u32,
-    downloading: u32,
-    seeding: u32,
-    download_speed: u64,
-    upload_speed: u64,
-}
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -87,11 +78,7 @@ pub struct AppModel {
 impl Default for AppModel {
     fn default() -> Self {
         let connections_config = ConnectionsConfig::default();
-        let connection = connections_config
-            .connections
-            .iter()
-            .find(|connection| connection.id == connections_config.active_connection)
-            .cloned()
+        let connection = selected_connection(&connections_config)
             .unwrap_or_else(|| connections_config.connections[0].clone());
 
         Self {
@@ -128,19 +115,9 @@ impl cosmic::Application for AppModel {
         core: cosmic::Core,
         _flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
-        let connections_config =
-            cosmic::cosmic_config::Config::new(Self::APP_ID, ConnectionsConfig::VERSION)
-                .ok()
-                .map(|config| {
-                    ConnectionsConfig::get_entry(&config).unwrap_or_else(|(_, config)| config)
-                })
-                .unwrap_or_default();
+        let connections_config = Self::load_connections_config();
 
-        let connection = connections_config
-            .connections
-            .iter()
-            .find(|connection| connection.id == connections_config.active_connection)
-            .cloned()
+        let connection = selected_connection(&connections_config)
             .unwrap_or_else(|| connections_config.connections[0].clone());
 
         let rpc_client = RpcClient::new(&connection);
@@ -324,20 +301,13 @@ impl cosmic::Application for AppModel {
                     return destroy_popup(popup);
                 }
 
-                self.connections_config = AppModel::load_connections_config();
+                self.connections_config = Self::load_connections_config();
 
-                let Some(connection) = self
-                    .connections_config
-                    .connections
-                    .iter()
-                    .find(|connection| connection.id == self.connections_config.active_connection)
-                    .cloned()
-                else {
+                let Some(connection) = selected_connection(&self.connections_config) else {
                     return Task::none();
                 };
 
-                let connection_changed = connection.id != self.connection.id
-                    || connection.poll_interval != self.connection.poll_interval;
+                let connection_changed = connection_changed(&self.connection, &connection);
 
                 self.connection = connection.clone();
                 self.rpc_client = RpcClient::new(&connection);
@@ -427,7 +397,6 @@ impl cosmic::Application for AppModel {
                 self.rpc_client = RpcClient::new(&self.connection);
                 self.rpc_session_id = None;
                 self.stats = TransmissionStats::default();
-
                 self.service_enabled = false;
                 self.state = ServiceState::Checking;
 
@@ -471,20 +440,8 @@ impl cosmic::Application for AppModel {
                 rpc_session_id,
             } => {
                 self.state = state;
-
-                if self.connection.service_scope.is_some() {
-                    match state {
-                        ServiceState::Running => {
-                            self.service_enabled = true;
-                        }
-                        ServiceState::Stopped => {
-                            self.service_enabled = false;
-                        }
-                        ServiceState::Checking | ServiceState::Error => {}
-                    }
-                } else {
-                    self.service_enabled = false;
-                }
+                self.service_enabled =
+                    service_enabled_for_state(self.connection.service_scope, state);
 
                 if let Some(stats) = stats {
                     self.stats = stats;
@@ -492,7 +449,7 @@ impl cosmic::Application for AppModel {
 
                 self.rpc_session_id = rpc_session_id;
 
-                if matches!(state, ServiceState::Stopped | ServiceState::Error) {
+                if clears_stats_for_state(state) {
                     self.stats = TransmissionStats::default();
                 }
             }
@@ -554,10 +511,7 @@ impl cosmic::Application for AppModel {
             }
 
             Message::OpenWebUi => {
-                let url = format!(
-                    "http://{}:{}/transmission/web/",
-                    self.connection.host, self.connection.rpc_port
-                );
+                let url = web_ui_url(&self.connection);
 
                 tokio::spawn(async move {
                     if let Err(error) = Command::new("xdg-open")
@@ -647,240 +601,168 @@ impl AppModel {
     }
 }
 
-async fn query_connection(
-    rpc_client: RpcClient,
-    session_id: Option<String>,
-    connection: Connection,
-) -> (ServiceState, Option<TransmissionStats>, Option<String>) {
-    if connection.service_scope.is_none() {
-        let (stats, session_id) = query_stats(rpc_client, session_id).await;
+fn selected_connection(config: &ConnectionsConfig) -> Option<Connection> {
+    config
+        .connections
+        .iter()
+        .find(|connection| connection.id == config.active_connection)
+        .cloned()
+}
 
-        return match stats {
-            Some(stats) => (ServiceState::Running, Some(stats), session_id),
-            None => (ServiceState::Error, None, session_id),
-        };
+fn connection_changed(current: &Connection, next: &Connection) -> bool {
+    current.id != next.id || current.poll_interval != next.poll_interval
+}
+
+fn service_enabled_for_state(scope: Option<ServiceScope>, state: ServiceState) -> bool {
+    if scope.is_none() {
+        return false;
     }
-
-    let service_scope = connection
-        .service_scope
-        .expect("local connection must have a service scope");
-
-    let service = ServiceController::new(service_scope);
-    let state = service.status().await;
 
     match state {
-        ServiceState::Running => {
-            let (stats, session_id) = query_stats(rpc_client, session_id).await;
-
-            (ServiceState::Running, stats, session_id)
-        }
-
-        ServiceState::Stopped => (
-            ServiceState::Stopped,
-            Some(TransmissionStats::default()),
-            session_id,
-        ),
-
-        ServiceState::Checking => (ServiceState::Checking, None, session_id),
-
-        ServiceState::Error => (
-            ServiceState::Error,
-            Some(TransmissionStats::default()),
-            session_id,
-        ),
+        ServiceState::Running => true,
+        ServiceState::Stopped => false,
+        ServiceState::Checking | ServiceState::Error => false,
     }
 }
 
-#[derive(Clone)]
-struct RpcClient {
-    client: reqwest::Client,
-    url: String,
-    connection_id: uuid::Uuid,
-    username: Option<String>,
+fn clears_stats_for_state(state: ServiceState) -> bool {
+    matches!(state, ServiceState::Stopped | ServiceState::Error)
 }
 
-impl RpcClient {
-    fn new(connection: &Connection) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .expect("failed to build RPC HTTP client");
+fn web_ui_url(connection: &Connection) -> String {
+    format!(
+        "http://{}:{}/transmission/web/",
+        connection.host, connection.rpc_port
+    )
+}
 
-        Self {
-            client,
-            url: format!(
-                "http://{}:{}/transmission/rpc",
-                connection.host, connection.rpc_port
-            ),
-            connection_id: connection.id,
-            username: if connection.username.is_empty() {
-                None
-            } else {
-                Some(connection.username.clone())
-            },
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosmic_transmission::config::PollInterval;
+
+    fn test_connection(id: uuid::Uuid) -> Connection {
+        Connection {
+            id,
+            name: "Test".to_owned(),
+            host: "localhost".to_owned(),
+            rpc_port: 9091,
+            username: String::new(),
+            service_scope: None,
+            poll_interval: PollInterval::TwoSeconds,
         }
     }
-}
 
-#[derive(Debug, serde::Deserialize)]
-struct RpcResponse {
-    result: String,
-    arguments: Option<RpcArguments>,
-}
+    #[test]
+    fn selected_connection_returns_active_connection() {
+        let active_id = uuid::Uuid::new_v4();
+        let other_id = uuid::Uuid::new_v4();
 
-#[derive(Debug, serde::Deserialize)]
-struct RpcArguments {
-    torrents: Option<Vec<RpcTorrent>>,
-}
+        let config = ConnectionsConfig {
+            connections: vec![test_connection(other_id), test_connection(active_id)],
+            active_connection: active_id,
+        };
 
-#[derive(Debug, serde::Deserialize)]
-struct RpcTorrent {
-    status: u8,
-    #[serde(rename = "rateDownload")]
-    rate_download: u64,
-    #[serde(rename = "rateUpload")]
-    rate_upload: u64,
-}
+        assert_eq!(selected_connection(&config).unwrap().id, active_id);
+    }
 
-#[derive(Debug, serde::Serialize)]
-struct RpcRequest<'a> {
-    method: &'a str,
-    arguments: RpcRequestArguments,
-}
+    #[test]
+    fn selected_connection_returns_none_for_unknown_active_id() {
+        let connection_id = uuid::Uuid::new_v4();
+        let active_id = uuid::Uuid::new_v4();
 
-#[derive(Debug, serde::Serialize)]
-struct RpcRequestArguments {
-    fields: [&'static str; 3],
-}
+        let config = ConnectionsConfig {
+            connections: vec![test_connection(connection_id)],
+            active_connection: active_id,
+        };
 
-async fn query_stats(
-    rpc_client: RpcClient,
-    session_id: Option<String>,
-) -> (Option<TransmissionStats>, Option<String>) {
-    let request = RpcRequest {
-        method: "torrent-get",
-        arguments: RpcRequestArguments {
-            fields: ["status", "rateDownload", "rateUpload"],
-        },
-    };
+        assert!(selected_connection(&config).is_none());
+    }
 
-    let password = if rpc_client.username.is_some() {
-        credentials::get_password(rpc_client.connection_id).await
-    } else {
-        None
-    };
+    #[test]
+    fn connection_changed_detects_different_connection() {
+        let first_id = uuid::Uuid::new_v4();
+        let second_id = uuid::Uuid::new_v4();
 
-    let mut request_builder = rpc_client.client.post(&rpc_client.url).json(&request);
+        let current = test_connection(first_id);
+        let next = test_connection(second_id);
 
-    if let Some(username) = rpc_client.username.as_deref() {
-        request_builder = request_builder.basic_auth(
-            username,
-            password.as_ref().map(|password| password.expose_secret()),
+        assert!(connection_changed(&current, &next));
+    }
+
+    #[test]
+    fn connection_changed_detects_poll_interval_change() {
+        let id = uuid::Uuid::new_v4();
+
+        let current = test_connection(id);
+        let mut next = test_connection(id);
+        next.poll_interval = PollInterval::FiveSeconds;
+
+        assert!(connection_changed(&current, &next));
+    }
+
+    #[test]
+    fn connection_changed_accepts_same_connection_and_poll_interval() {
+        let id = uuid::Uuid::new_v4();
+
+        let current = test_connection(id);
+        let next = test_connection(id);
+
+        assert!(!connection_changed(&current, &next));
+    }
+
+    #[test]
+    fn service_enabled_for_state_requires_local_service_scope() {
+        assert!(service_enabled_for_state(
+            Some(ServiceScope::User),
+            ServiceState::Running
+        ));
+        assert!(service_enabled_for_state(
+            Some(ServiceScope::System),
+            ServiceState::Running
+        ));
+        assert!(!service_enabled_for_state(None, ServiceState::Running));
+    }
+
+    #[test]
+    fn service_enabled_for_state_is_false_when_service_is_stopped() {
+        assert!(!service_enabled_for_state(
+            Some(ServiceScope::User),
+            ServiceState::Stopped
+        ));
+    }
+
+    #[test]
+    fn service_enabled_for_state_is_false_while_checking_or_on_error() {
+        assert!(!service_enabled_for_state(
+            Some(ServiceScope::User),
+            ServiceState::Checking
+        ));
+        assert!(!service_enabled_for_state(
+            Some(ServiceScope::User),
+            ServiceState::Error
+        ));
+    }
+
+    #[test]
+    fn clears_stats_for_stopped_and_error_states() {
+        assert!(clears_stats_for_state(ServiceState::Stopped));
+        assert!(clears_stats_for_state(ServiceState::Error));
+    }
+
+    #[test]
+    fn clears_stats_for_running_and_checking_states() {
+        assert!(!clears_stats_for_state(ServiceState::Running));
+        assert!(!clears_stats_for_state(ServiceState::Checking));
+    }
+
+    #[test]
+    fn web_ui_url_uses_connection_host_and_port() {
+        let connection = test_connection(uuid::Uuid::new_v4());
+
+        assert_eq!(
+            web_ui_url(&connection),
+            "http://localhost:9091/transmission/web/"
         );
-    }
-
-    if let Some(session_id) = session_id.as_deref() {
-        request_builder = request_builder.header("X-Transmission-Session-Id", session_id);
-    }
-
-    let response = match request_builder.send().await {
-        Ok(response) => response,
-        Err(error) => {
-            tracing::warn!(%error, "Transmission RPC request failed");
-            return (None, session_id);
-        }
-    };
-
-    if response.status().is_success() {
-        let stats = parse_rpc_response(response).await;
-        return (Some(stats), session_id);
-    }
-
-    if response.status() == reqwest::StatusCode::CONFLICT {
-        let new_session_id = response
-            .headers()
-            .get("X-Transmission-Session-Id")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-
-        let Some(new_session_id) = new_session_id else {
-            tracing::warn!("Transmission RPC response did not include a session ID");
-            return (None, None);
-        };
-
-        let mut retry_request = rpc_client
-            .client
-            .post(&rpc_client.url)
-            .header("X-Transmission-Session-Id", &new_session_id)
-            .json(&request);
-
-        if let Some(username) = rpc_client.username.as_deref() {
-            retry_request = retry_request.basic_auth(
-                username,
-                password.as_ref().map(|password| password.expose_secret()),
-            );
-        }
-
-        let response = match retry_request.send().await {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::warn!(%error, "Transmission RPC retry failed");
-                return (None, Some(new_session_id));
-            }
-        };
-
-        let stats = parse_rpc_response(response).await;
-        return (Some(stats), Some(new_session_id));
-    }
-
-    (None, session_id)
-}
-
-async fn parse_rpc_response(response: reqwest::Response) -> TransmissionStats {
-    let response: RpcResponse = match response.json().await {
-        Ok(response) => response,
-        Err(error) => {
-            tracing::warn!(%error, "failed to parse Transmission RPC response");
-            return TransmissionStats::default();
-        }
-    };
-
-    if response.result != "success" {
-        tracing::warn!(result = %response.result, "Transmission RPC returned an error");
-        return TransmissionStats::default();
-    }
-
-    let torrents = match response.arguments.and_then(|args| args.torrents) {
-        Some(torrents) => torrents,
-        None => return TransmissionStats::default(),
-    };
-
-    let mut stats = TransmissionStats::default();
-
-    for torrent in torrents {
-        if torrent.status != 0 {
-            stats.active += 1;
-        }
-
-        match torrent.status {
-            4 => stats.downloading += 1,
-            6 => stats.seeding += 1,
-            _ => {}
-        }
-
-        stats.download_speed += torrent.rate_download;
-        stats.upload_speed += torrent.rate_upload;
-    }
-
-    stats
-}
-
-fn format_speed(bytes_per_second: u64) -> String {
-    if bytes_per_second >= 1024 * 1024 {
-        format!("{:.1} MiB/s", bytes_per_second as f64 / (1024.0 * 1024.0))
-    } else if bytes_per_second >= 1024 {
-        format!("{:.0} KiB/s", bytes_per_second as f64 / 1024.0)
-    } else {
-        format!("{} B/s", bytes_per_second)
     }
 }

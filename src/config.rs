@@ -89,7 +89,15 @@ pub fn local_connections() -> [Connection; 2] {
     ]
 }
 
-#[derive(Clone, cosmic_config::cosmic_config_derive::CosmicConfigEntry, Debug, Eq, PartialEq)]
+#[derive(
+    Clone,
+    cosmic_config::cosmic_config_derive::CosmicConfigEntry,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[version = 1]
 pub struct ConnectionsConfig {
     pub connections: Vec<Connection>,
@@ -114,4 +122,87 @@ impl std::fmt::Display for ServiceScope {
             Self::System => "System",
         })
     }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poll_interval_defaults_to_two_seconds() {
+        assert_eq!(PollInterval::default(), PollInterval::TwoSeconds);
+    }
+
+    #[test]
+    fn poll_interval_durations_are_correct() {
+        assert_eq!(
+            PollInterval::OneSecond.duration(),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            PollInterval::TwoSeconds.duration(),
+            std::time::Duration::from_secs(2)
+        );
+        assert_eq!(
+            PollInterval::FiveSeconds.duration(),
+            std::time::Duration::from_secs(5)
+        );
+        assert_eq!(
+            PollInterval::TenSeconds.duration(),
+            std::time::Duration::from_secs(10)
+        );
+        assert_eq!(
+            PollInterval::ThirtySeconds.duration(),
+            std::time::Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn poll_interval_display_is_correct() {
+        assert_eq!(PollInterval::OneSecond.to_string(), "1 second");
+        assert_eq!(PollInterval::TwoSeconds.to_string(), "2 seconds");
+        assert_eq!(PollInterval::FiveSeconds.to_string(), "5 seconds");
+        assert_eq!(PollInterval::TenSeconds.to_string(), "10 seconds");
+        assert_eq!(PollInterval::ThirtySeconds.to_string(), "30 seconds");
+    }
+
+    #[test]
+    fn local_connections_are_correct() {
+        let connections = local_connections();
+
+        assert_eq!(connections.len(), 2);
+
+        assert_eq!(connections[0].id, LOCAL_USER_ID);
+        assert_eq!(connections[0].name, "Local User");
+        assert_eq!(connections[0].host, "localhost");
+        assert_eq!(connections[0].rpc_port, 9091);
+        assert!(connections[0].username.is_empty());
+        assert_eq!(connections[0].service_scope, Some(ServiceScope::User));
+        assert_eq!(connections[0].poll_interval, PollInterval::TwoSeconds);
+
+        assert_eq!(connections[1].id, LOCAL_SYSTEM_ID);
+        assert_eq!(connections[1].name, "Local System");
+        assert_eq!(connections[1].host, "localhost");
+        assert_eq!(connections[1].rpc_port, 9091);
+        assert!(connections[1].username.is_empty());
+        assert_eq!(connections[1].service_scope, Some(ServiceScope::System));
+        assert_eq!(connections[1].poll_interval, PollInterval::TwoSeconds);
+    }
+
+    #[test]
+    fn connections_config_defaults_to_local_connections() {
+        let config = ConnectionsConfig::default();
+
+        assert_eq!(config.connections, local_connections().to_vec());
+        assert_eq!(config.active_connection, LOCAL_USER_ID);
+    }
+}
+#[test]
+fn connections_config_round_trips_through_json() {
+    let config = ConnectionsConfig::default();
+
+    let serialized = serde_json::to_string(&config).expect("failed to serialize config");
+    let deserialized: ConnectionsConfig =
+        serde_json::from_str(&serialized).expect("failed to deserialize config");
+
+    assert_eq!(deserialized, config);
 }

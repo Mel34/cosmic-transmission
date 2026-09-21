@@ -9,20 +9,21 @@ use crate::config::{
     Connection, ConnectionsConfig, LOCAL_SYSTEM_ID, LOCAL_USER_ID, PollInterval, ServiceScope,
 };
 use crate::credentials;
-use cosmic_config::CosmicConfigEntry;
-use secrecy::{ExposeSecret, SecretString};
-
+use crate::service::ServiceController;
 use cosmic::iced::advanced::Renderer;
 use cosmic::iced::core::widget::{Operation, Tree, tree};
 use cosmic::iced::core::{Clipboard, Shell, Widget, layout, overlay, renderer};
 use cosmic::iced::{Alignment, Point, Rectangle, Size, Vector, event, mouse, touch};
+use cosmic_config::CosmicConfigEntry;
+use secrecy::{ExposeSecret, SecretString};
 
 const DRAG_START_DISTANCE_SQUARED: f32 = 64.0;
 
 #[derive(Debug, Clone)]
 pub enum Message {
     SelectConnection(uuid::Uuid),
-    PasswordLoaded(Option<SecretString>),
+    PasswordLoaded(Option<String>),
+    UsernameLoaded(Option<String>),
     TogglePasswordVisibility,
     AddConnection,
     DeleteConnection(uuid::Uuid),
@@ -43,8 +44,9 @@ pub enum Message {
 pub struct SettingsModel {
     core: cosmic::Core,
     connections_config: ConnectionsConfig,
-    selected_connection: uuid::Uuid,
-    password: SecretString,
+    selected_connection: Connection,
+    password: Option<String>,
+    local_username: Option<String>,
     password_hidden: bool,
 }
 
@@ -81,28 +83,51 @@ impl Application for SettingsModel {
             .skip_while(|arg| arg != "--connection")
             .nth(1)
             .and_then(|id| uuid::Uuid::parse_str(&id).ok())
-            .filter(|id| {
+            .and_then(|id| {
                 connections_config
                     .connections
                     .iter()
-                    .any(|connection| connection.id == *id)
+                    .find(|connection| connection.id == id)
+                    .cloned()
             })
-            .unwrap_or(connections_config.active_connection);
+            .or_else(|| {
+                connections_config
+                    .connections
+                    .iter()
+                    .find(|connection| connection.id == connections_config.active_connection)
+                    .cloned()
+            })
+            .expect("Active connection must exist");
 
-        let task =
-            cosmic::Task::perform(credentials::get_password(selected_connection), |password| {
-                cosmic::Action::App(Message::PasswordLoaded(password))
-            });
+        let password_task = cosmic::Task::perform(
+            credentials::get_password(selected_connection.id),
+            |password| {
+                cosmic::Action::App(Message::PasswordLoaded(
+                    password.map(|password| password.expose_secret().to_string()),
+                ))
+            },
+        );
+
+        let username_task = if let Some(scope) = selected_connection.service_scope {
+            cosmic::Task::perform(ServiceController::new(scope).username(), |username| {
+                cosmic::Action::App(Message::UsernameLoaded(username))
+            })
+        } else {
+            cosmic::Task::perform(async { None }, |username| {
+                cosmic::Action::App(Message::UsernameLoaded(username))
+            })
+        };
 
         (
             Self {
                 core,
-                selected_connection,
                 connections_config,
-                password: SecretString::new(String::new().into()),
+                selected_connection,
+                password: None,
+                local_username: None,
                 password_hidden: true,
             },
-            task,
+            cosmic::Task::batch([password_task, username_task]),
         )
     }
 
@@ -113,23 +138,46 @@ impl Application for SettingsModel {
     fn update(&mut self, message: Self::Message) -> cosmic::Task<cosmic::Action<Self::Message>> {
         match message {
             Message::SelectConnection(id) => {
-                if self
+                let Some(connection) = self
                     .connections_config
                     .connections
                     .iter()
-                    .any(|connection| connection.id == id)
-                {
-                    self.selected_connection = id;
-                    self.password = SecretString::new(String::new().into());
+                    .find(|connection| connection.id == id)
+                    .cloned()
+                else {
+                    return cosmic::Task::none();
+                };
 
-                    return cosmic::Task::perform(credentials::get_password(id), |password| {
-                        cosmic::Action::App(Message::PasswordLoaded(password))
+                self.selected_connection = connection.clone();
+                self.password = None;
+                self.local_username = None;
+
+                let password_task =
+                    cosmic::Task::perform(credentials::get_password(connection.id), |password| {
+                        cosmic::Action::App(Message::PasswordLoaded(
+                            password.map(|password| password.expose_secret().to_string()),
+                        ))
                     });
-                }
+
+                let username_task = if let Some(scope) = connection.service_scope {
+                    cosmic::Task::perform(ServiceController::new(scope).username(), |username| {
+                        cosmic::Action::App(Message::UsernameLoaded(username))
+                    })
+                } else {
+                    cosmic::Task::perform(async { None }, |username| {
+                        cosmic::Action::App(Message::UsernameLoaded(username))
+                    })
+                };
+
+                return cosmic::Task::batch([password_task, username_task]);
             }
 
             Message::PasswordLoaded(password) => {
-                self.password = password.unwrap_or_default();
+                self.password = password;
+            }
+
+            Message::UsernameLoaded(username) => {
+                self.local_username = username;
             }
 
             Message::TogglePasswordVisibility => {
@@ -139,7 +187,7 @@ impl Application for SettingsModel {
             Message::AddConnection => {
                 let id = uuid::Uuid::new_v4();
 
-                self.connections_config.connections.push(Connection {
+                let connection = Connection {
                     id,
                     name: "New Connection".to_string(),
                     host: "localhost".to_string(),
@@ -147,14 +195,16 @@ impl Application for SettingsModel {
                     username: String::new(),
                     service_scope: None,
                     poll_interval: PollInterval::default(),
-                });
+                };
 
-                self.selected_connection = id;
-                self.password = SecretString::new(String::new().into());
+                self.connections_config.connections.push(connection.clone());
+                self.selected_connection = connection;
+                self.password = None;
+                self.local_username = None;
             }
 
             Message::DeleteConnection(id) => {
-                if id == LOCAL_USER_ID || id == LOCAL_SYSTEM_ID {
+                if !can_delete_connection(id) {
                     return cosmic::Task::none();
                 }
 
@@ -170,13 +220,19 @@ impl Application for SettingsModel {
                         self.connections_config.active_connection = LOCAL_USER_ID;
                     }
 
-                    if self.selected_connection == id {
-                        self.selected_connection = self.connections_config.active_connection;
-                        self.password = SecretString::new(String::new().into());
+                    if self.selected_connection.id == id {
+                        let selected_id = self.connections_config.active_connection;
 
-                        return cosmic::Task::perform(credentials::delete_password(id), |_| {
-                            cosmic::Action::App(Message::PasswordLoaded(None))
-                        });
+                        self.selected_connection = self
+                            .connections_config
+                            .connections
+                            .iter()
+                            .find(|connection| connection.id == selected_id)
+                            .cloned()
+                            .expect("Local User connection must exist");
+
+                        self.password = None;
+                        self.local_username = None;
                     }
 
                     return cosmic::Task::perform(credentials::delete_password(id), |_| {
@@ -186,49 +242,13 @@ impl Application for SettingsModel {
             }
 
             Message::ReorderConnections(ids) => {
-                if ids.len() != self.connections_config.connections.len() {
-                    return cosmic::Task::none();
-                }
-
-                let mut seen = std::collections::HashSet::with_capacity(ids.len());
-
-                for id in &ids {
-                    if !seen.insert(*id)
-                        || !self
-                            .connections_config
-                            .connections
-                            .iter()
-                            .any(|connection| connection.id == *id)
-                    {
-                        return cosmic::Task::none();
-                    }
-                }
-
-                let mut reordered = Vec::with_capacity(ids.len());
-
-                for id in ids {
-                    if let Some(connection) = self
-                        .connections_config
-                        .connections
-                        .iter()
-                        .find(|connection| connection.id == id)
-                    {
-                        reordered.push(connection.clone());
-                    }
-                }
-
-                self.connections_config.connections = reordered;
+                self.connections_config.connections =
+                    reorder_connections(&self.connections_config.connections, &ids);
             }
 
             Message::SetActiveConnection => {
-                if self
-                    .connections_config
-                    .connections
-                    .iter()
-                    .any(|connection| connection.id == self.selected_connection)
-                {
-                    self.connections_config.active_connection = self.selected_connection;
-                }
+                self.connections_config.active_connection =
+                    active_connection(&self.connections_config, self.selected_connection.id);
             }
 
             Message::NameChanged(name) => {
@@ -246,30 +266,33 @@ impl Application for SettingsModel {
             }
 
             Message::UsernameChanged(username) => {
-                if let Some(connection) = self.selected_connection_mut() {
+                if let Some(connection) = self.selected_connection_mut()
+                    && connection.service_scope.is_none()
+                {
                     connection.username = username;
                 }
             }
 
             Message::PasswordChanged(password) => {
-                self.password = SecretString::new(password.into());
+                self.password = Some(password);
             }
 
             Message::SavePassword => {
-                let id = self.selected_connection;
+                let id = self.selected_connection.id;
 
-                if !self.password.expose_secret().is_empty() {
-                    let password = self.password.clone();
-
-                    return cosmic::Task::perform(credentials::set_password(id, password), |_| {
-                        cosmic::Action::App(Message::PasswordLoaded(None))
-                    });
+                if let Some(password) = self.password.clone()
+                    && !password.is_empty()
+                {
+                    return cosmic::Task::perform(
+                        credentials::set_password(id, SecretString::from(password)),
+                        |_| cosmic::Action::App(Message::PasswordLoaded(None)),
+                    );
                 }
             }
 
             Message::ClearPassword => {
-                let id = self.selected_connection;
-                self.password = SecretString::new(String::new().into());
+                let id = self.selected_connection.id;
+                self.password = None;
 
                 return cosmic::Task::perform(credentials::delete_password(id), |_| {
                     cosmic::Action::App(Message::PasswordLoaded(None))
@@ -277,8 +300,9 @@ impl Application for SettingsModel {
             }
 
             Message::RpcPortChanged(port) => {
-                if let Ok(port) = port.parse::<u16>()
+                if let Some(port) = parse_rpc_port(&port)
                     && let Some(connection) = self.selected_connection_mut()
+                    && connection.service_scope.is_none()
                 {
                     connection.rpc_port = port;
                 }
@@ -286,13 +310,7 @@ impl Application for SettingsModel {
 
             Message::ServiceScopeChanged(scope) => {
                 if let Some(connection) = self.selected_connection_mut() {
-                    if connection.id == LOCAL_USER_ID {
-                        connection.service_scope = Some(ServiceScope::User);
-                    } else if connection.id == LOCAL_SYSTEM_ID {
-                        connection.service_scope = Some(ServiceScope::System);
-                    } else {
-                        connection.service_scope = Some(scope);
-                    }
+                    apply_service_scope(connection, scope);
                 }
             }
 
@@ -321,19 +339,11 @@ impl Application for SettingsModel {
 }
 
 impl SettingsModel {
-    fn selected_connection(&self) -> &Connection {
-        self.connections_config
-            .connections
-            .iter()
-            .find(|connection| connection.id == self.selected_connection)
-            .expect("Selected connection must exist")
-    }
-
     fn selected_connection_mut(&mut self) -> Option<&mut Connection> {
         self.connections_config
             .connections
             .iter_mut()
-            .find(|connection| connection.id == self.selected_connection)
+            .find(|connection| connection.id == self.selected_connection.id)
     }
 
     fn settings_view(&self) -> Element<'_, Message> {
@@ -349,7 +359,7 @@ impl SettingsModel {
             ])
             .align_y(Alignment::Center);
 
-            let connection = self.selected_connection();
+            let connection = &self.selected_connection;
 
             let navigation_mode = if size.width >= 700.0 {
                 ConnectionNavigationMode::Full
@@ -361,7 +371,7 @@ impl SettingsModel {
 
             let connection_list = ConnectionReorderList::new(
                 self.connections_config.connections.clone(),
-                self.selected_connection,
+                self.selected_connection.id,
                 self.connections_config.active_connection,
                 Message::SelectConnection,
                 Message::DeleteConnection,
@@ -399,8 +409,11 @@ impl SettingsModel {
             let username = if selected_is_local {
                 widget::settings::item(
                     "Username",
-                    widget::text_input("Username", &connection.username)
-                        .width(Length::Fixed(220.0)),
+                    widget::text_input(
+                        "Username",
+                        self.local_username.as_deref().unwrap_or("Unknown"),
+                    )
+                    .width(Length::Fixed(220.0)),
                 )
             } else {
                 widget::settings::item(
@@ -443,7 +456,7 @@ impl SettingsModel {
                 "Password",
                 widget::secure_input(
                     "Password",
-                    self.password.expose_secret(),
+                    self.password.as_deref().unwrap_or(""),
                     Some(Message::TogglePasswordVisibility),
                     self.password_hidden,
                 )
@@ -561,6 +574,57 @@ impl SettingsModel {
     }
 }
 
+fn can_delete_connection(id: uuid::Uuid) -> bool {
+    id != LOCAL_USER_ID && id != LOCAL_SYSTEM_ID
+}
+
+fn active_connection(config: &ConnectionsConfig, selected: uuid::Uuid) -> uuid::Uuid {
+    if config
+        .connections
+        .iter()
+        .any(|connection| connection.id == selected)
+    {
+        selected
+    } else {
+        config.active_connection
+    }
+}
+
+fn parse_rpc_port(port: &str) -> Option<u16> {
+    port.parse::<u16>().ok()
+}
+
+fn apply_service_scope(connection: &mut Connection, scope: ServiceScope) {
+    match connection.id {
+        LOCAL_USER_ID => connection.service_scope = Some(ServiceScope::User),
+        LOCAL_SYSTEM_ID => connection.service_scope = Some(ServiceScope::System),
+        _ => connection.service_scope = Some(scope),
+    }
+}
+
+fn reorder_connections(connections: &[Connection], ids: &[uuid::Uuid]) -> Vec<Connection> {
+    if ids.len() != connections.len() {
+        return connections.to_vec();
+    }
+
+    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+
+    for id in ids {
+        if !seen.insert(*id) || !connections.iter().any(|connection| connection.id == *id) {
+            return connections.to_vec();
+        }
+    }
+
+    ids.iter()
+        .filter_map(|id| {
+            connections
+                .iter()
+                .find(|connection| connection.id == *id)
+                .cloned()
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectionNavigationMode {
     Full,
@@ -612,7 +676,7 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
 
     fn connection_row(
         connection: &Connection,
-        selected: uuid::Uuid,
+        _selected: uuid::Uuid,
         active: uuid::Uuid,
         on_delete: &dyn Fn(uuid::Uuid) -> Message,
         navigation_mode: ConnectionNavigationMode,
@@ -667,11 +731,7 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
                 widget::container(content)
                     .padding(8)
                     .width(Length::Fill)
-                    .class(if connection.id == selected {
-                        theme::Container::Primary
-                    } else {
-                        theme::Container::Primary
-                    })
+                    .class(theme::Container::Primary)
                     .into()
             }
 
@@ -698,11 +758,7 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
                 widget::container(content)
                     .padding(8)
                     .width(Length::Fill)
-                    .class(if connection.id == selected {
-                        theme::Container::Primary
-                    } else {
-                        theme::Container::Primary
-                    })
+                    .class(theme::Container::Primary)
                     .into()
             }
 
@@ -771,11 +827,7 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
                 widget::container(content)
                     .padding(8)
                     .width(Length::Fill)
-                    .class(if connection.id == selected {
-                        theme::Container::Primary
-                    } else {
-                        theme::Container::Primary
-                    })
+                    .class(theme::Container::Primary)
                     .into()
             }
         }
@@ -868,6 +920,7 @@ impl<Message: 'static + Clone> Widget<Message, cosmic::Theme, cosmic::Renderer>
         let mut children = Vec::with_capacity(self.rows.len());
         let mut y = 0.0;
         let mut width: f32 = 0.0;
+
         for (row, state) in self.rows.iter_mut().zip(tree.children.iter_mut()) {
             let mut node = row.as_widget_mut().layout(state, renderer, &row_limits);
 
@@ -1169,5 +1222,230 @@ impl<'a, Message: 'static + Clone> From<ConnectionReorderList<'a, Message>>
 {
     fn from(list: ConnectionReorderList<'a, Message>) -> Self {
         Element::new(list)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Connection, ConnectionsConfig, PollInterval, ServiceScope};
+
+    fn test_connection(id: uuid::Uuid, name: &str) -> Connection {
+        Connection {
+            id,
+            name: name.to_string(),
+            host: "localhost".to_string(),
+            rpc_port: 9091,
+            username: String::new(),
+            service_scope: None,
+            poll_interval: PollInterval::TwoSeconds,
+        }
+    }
+
+    #[test]
+    fn local_connections_cannot_be_deleted() {
+        assert!(!can_delete_connection(LOCAL_USER_ID));
+        assert!(!can_delete_connection(LOCAL_SYSTEM_ID));
+    }
+
+    #[test]
+    fn remote_connections_can_be_deleted() {
+        let id = uuid::Uuid::new_v4();
+
+        assert!(can_delete_connection(id));
+    }
+
+    #[test]
+    fn active_connection_accepts_existing_selection() {
+        let remote_id = uuid::Uuid::new_v4();
+
+        let config = ConnectionsConfig {
+            connections: vec![
+                Connection {
+                    id: LOCAL_USER_ID,
+                    name: "Local User".to_string(),
+                    host: "localhost".to_string(),
+                    rpc_port: 9091,
+                    username: String::new(),
+                    service_scope: Some(ServiceScope::User),
+                    poll_interval: PollInterval::TwoSeconds,
+                },
+                test_connection(remote_id, "Remote"),
+            ],
+            active_connection: LOCAL_USER_ID,
+        };
+
+        assert_eq!(active_connection(&config, remote_id), remote_id);
+    }
+
+    #[test]
+    fn active_connection_falls_back_to_configured_active_connection() {
+        let remote_id = uuid::Uuid::new_v4();
+
+        let config = ConnectionsConfig {
+            connections: vec![
+                Connection {
+                    id: LOCAL_USER_ID,
+                    name: "Local User".to_string(),
+                    host: "localhost".to_string(),
+                    rpc_port: 9091,
+                    username: String::new(),
+                    service_scope: Some(ServiceScope::User),
+                    poll_interval: PollInterval::TwoSeconds,
+                },
+                test_connection(remote_id, "Remote"),
+            ],
+            active_connection: remote_id,
+        };
+
+        assert_eq!(active_connection(&config, uuid::Uuid::new_v4()), remote_id);
+    }
+
+    #[test]
+    fn parse_rpc_port_accepts_valid_port() {
+        assert_eq!(parse_rpc_port("9091"), Some(9091));
+    }
+
+    #[test]
+    fn parse_rpc_port_rejects_invalid_port() {
+        assert_eq!(parse_rpc_port("invalid"), None);
+    }
+
+    #[test]
+    fn parse_rpc_port_rejects_out_of_range_port() {
+        assert_eq!(parse_rpc_port("65536"), None);
+    }
+
+    #[test]
+    fn apply_service_scope_preserves_local_user_scope() {
+        let mut connection = Connection {
+            id: LOCAL_USER_ID,
+            name: "Local User".to_string(),
+            host: "localhost".to_string(),
+            rpc_port: 9091,
+            username: String::new(),
+            service_scope: Some(ServiceScope::User),
+            poll_interval: PollInterval::TwoSeconds,
+        };
+
+        apply_service_scope(&mut connection, ServiceScope::System);
+
+        assert_eq!(connection.service_scope, Some(ServiceScope::User));
+    }
+
+    #[test]
+    fn apply_service_scope_preserves_local_system_scope() {
+        let mut connection = Connection {
+            id: LOCAL_SYSTEM_ID,
+            name: "Local System".to_string(),
+            host: "localhost".to_string(),
+            rpc_port: 9091,
+            username: String::new(),
+            service_scope: Some(ServiceScope::System),
+            poll_interval: PollInterval::TwoSeconds,
+        };
+
+        apply_service_scope(&mut connection, ServiceScope::User);
+
+        assert_eq!(connection.service_scope, Some(ServiceScope::System));
+    }
+
+    #[test]
+    fn apply_service_scope_changes_remote_scope() {
+        let id = uuid::Uuid::new_v4();
+
+        let mut connection = test_connection(id, "Remote");
+
+        apply_service_scope(&mut connection, ServiceScope::System);
+
+        assert_eq!(connection.service_scope, Some(ServiceScope::System));
+    }
+
+    #[test]
+    fn reorder_connections_reorders_by_id() {
+        let first_id = uuid::Uuid::new_v4();
+        let second_id = uuid::Uuid::new_v4();
+        let third_id = uuid::Uuid::new_v4();
+
+        let connections = vec![
+            test_connection(first_id, "First"),
+            test_connection(second_id, "Second"),
+            test_connection(third_id, "Third"),
+        ];
+
+        let reordered = reorder_connections(&connections, &[third_id, first_id, second_id]);
+
+        assert_eq!(
+            reordered
+                .iter()
+                .map(|connection| connection.id)
+                .collect::<Vec<_>>(),
+            vec![third_id, first_id, second_id]
+        );
+    }
+
+    #[test]
+    fn reorder_connections_rejects_wrong_length() {
+        let first_id = uuid::Uuid::new_v4();
+        let second_id = uuid::Uuid::new_v4();
+
+        let connections = vec![
+            test_connection(first_id, "First"),
+            test_connection(second_id, "Second"),
+        ];
+
+        let reordered = reorder_connections(&connections, &[first_id]);
+
+        assert_eq!(reordered, connections);
+    }
+
+    #[test]
+    fn reorder_connections_rejects_duplicate_ids() {
+        let first_id = uuid::Uuid::new_v4();
+        let second_id = uuid::Uuid::new_v4();
+
+        let connections = vec![
+            test_connection(first_id, "First"),
+            test_connection(second_id, "Second"),
+        ];
+
+        let reordered = reorder_connections(&connections, &[first_id, first_id]);
+
+        assert_eq!(reordered, connections);
+    }
+
+    #[test]
+    fn reorder_connections_rejects_unknown_ids() {
+        let first_id = uuid::Uuid::new_v4();
+        let second_id = uuid::Uuid::new_v4();
+        let unknown_id = uuid::Uuid::new_v4();
+
+        let connections = vec![
+            test_connection(first_id, "First"),
+            test_connection(second_id, "Second"),
+        ];
+
+        let reordered = reorder_connections(&connections, &[first_id, unknown_id]);
+
+        assert_eq!(reordered, connections);
+    }
+
+    #[test]
+    fn reorder_connections_preserves_connection_data() {
+        let first_id = uuid::Uuid::new_v4();
+        let second_id = uuid::Uuid::new_v4();
+
+        let mut first = test_connection(first_id, "First");
+        first.host = "example.com".to_string();
+        first.username = "user".to_string();
+        first.rpc_port = 1234;
+
+        let second = test_connection(second_id, "Second");
+
+        let reordered =
+            reorder_connections(&[first.clone(), second.clone()], &[second_id, first_id]);
+
+        assert_eq!(reordered[0], second);
+        assert_eq!(reordered[1], first);
     }
 }

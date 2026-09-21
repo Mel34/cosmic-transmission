@@ -1139,6 +1139,7 @@ dependencies = [
  "secrecy",
  "secret-service",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "uuid",
