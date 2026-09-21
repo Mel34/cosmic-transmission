@@ -1,5 +1,3 @@
-use tokio::process::Command;
-
 use crate::config::ServiceScope;
 
 const SERVICE: &str = "transmission-daemon.service";
@@ -10,6 +8,13 @@ pub enum ServiceState {
     Checking,
     Stopped,
     Error,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceAction {
+    Start,
+    Stop,
+    Restart,
 }
 
 #[derive(Clone, Copy)]
@@ -23,52 +28,28 @@ impl ServiceController {
     }
 
     pub async fn status(self) -> ServiceState {
+        let Ok(connection) = self.connection().await else {
+            tracing::error!(?self.scope, "failed to connect to systemd");
+            return ServiceState::Error;
+        };
+
+        service_status(&connection).await
+    }
+
+    pub async fn action(self, action: ServiceAction) -> ServiceState {
+        let Ok(connection) = self.connection().await else {
+            tracing::error!(?self.scope, ?action, "failed to connect to systemd");
+            return ServiceState::Error;
+        };
+
+        service_action(&connection, action).await
+    }
+
+    async fn connection(self) -> zbus::Result<zbus::Connection> {
         match self.scope {
-            ServiceScope::User => user_service_status().await,
-            ServiceScope::System => system_service_status().await,
+            ServiceScope::User => zbus::Connection::session().await,
+            ServiceScope::System => zbus::Connection::system().await,
         }
-    }
-
-    pub async fn action(self, action: &'static str) -> ServiceState {
-        match self.scope {
-            ServiceScope::User => user_service_action(action).await,
-            ServiceScope::System => system_service_action(action).await,
-        }
-    }
-}
-
-async fn user_service_status() -> ServiceState {
-    let output = Command::new("systemctl")
-        .args(["--user", "is-active", SERVICE])
-        .output()
-        .await;
-
-    match output {
-        Ok(output) if output.status.success() => {
-            match String::from_utf8_lossy(&output.stdout).trim() {
-                "active" => ServiceState::Running,
-                "activating" | "deactivating" => ServiceState::Checking,
-                _ => ServiceState::Error,
-            }
-        }
-        Ok(output) => match String::from_utf8_lossy(&output.stdout).trim() {
-            "inactive" | "failed" => ServiceState::Stopped,
-            "activating" | "deactivating" => ServiceState::Checking,
-            _ => ServiceState::Error,
-        },
-        Err(_) => ServiceState::Error,
-    }
-}
-
-async fn user_service_action(action: &'static str) -> ServiceState {
-    let result = Command::new("systemctl")
-        .args(["--user", action, SERVICE])
-        .status()
-        .await;
-
-    match result {
-        Ok(status) if status.success() => user_service_status().await,
-        _ => ServiceState::Error,
     }
 }
 
@@ -91,7 +72,14 @@ trait SystemdManager {
         name: &str,
         mode: &str,
     ) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+
+    async fn restart_unit(
+        &self,
+        name: &str,
+        mode: &str,
+    ) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
 }
+
 #[zbus::proxy(
     interface = "org.freedesktop.systemd1.Unit",
     default_service = "org.freedesktop.systemd1"
@@ -101,14 +89,9 @@ trait SystemdUnit {
     fn active_state(&self) -> zbus::Result<String>;
 }
 
-async fn system_service_status() -> ServiceState {
-    let Ok(connection) = zbus::Connection::system().await else {
-        return ServiceState::Error;
-    };
-
-    let manager = SystemdManagerProxy::new(&connection).await;
-
-    let Ok(manager) = manager else {
+async fn service_status(connection: &zbus::Connection) -> ServiceState {
+    let Ok(manager) = SystemdManagerProxy::new(connection).await else {
+        tracing::error!("failed to create systemd manager proxy");
         return ServiceState::Error;
     };
 
@@ -116,39 +99,50 @@ async fn system_service_status() -> ServiceState {
         return ServiceState::Stopped;
     };
 
-    let Ok(builder) = SystemdUnitProxy::builder(&connection).path(unit_path) else {
+    let Ok(builder) = SystemdUnitProxy::builder(connection).path(unit_path) else {
+        tracing::error!("failed to create systemd unit proxy builder");
         return ServiceState::Error;
     };
 
     let Ok(unit) = builder.build().await else {
+        tracing::error!("failed to build systemd unit proxy");
         return ServiceState::Error;
     };
 
-    match unit.active_state().await.as_deref() {
-        Ok("active") => ServiceState::Running,
-        Ok("activating" | "deactivating" | "reloading") => ServiceState::Checking,
-        Ok("inactive" | "failed") => ServiceState::Stopped,
-        _ => ServiceState::Error,
+    match unit.active_state().await {
+        Ok(state) => match state.as_str() {
+            "active" => ServiceState::Running,
+            "activating" | "deactivating" | "reloading" => ServiceState::Checking,
+            "inactive" | "failed" => ServiceState::Stopped,
+            other => {
+                tracing::warn!(active_state = other, "unknown systemd service state");
+                ServiceState::Error
+            }
+        },
+        Err(error) => {
+            tracing::error!(%error, "failed to query systemd service state");
+            ServiceState::Error
+        }
     }
 }
 
-async fn system_service_action(action: &'static str) -> ServiceState {
-    let Ok(connection) = zbus::Connection::system().await else {
-        return ServiceState::Error;
-    };
-
-    let Ok(manager) = SystemdManagerProxy::new(&connection).await else {
+async fn service_action(connection: &zbus::Connection, action: ServiceAction) -> ServiceState {
+    let Ok(manager) = SystemdManagerProxy::new(connection).await else {
+        tracing::error!(?action, "failed to create systemd manager proxy");
         return ServiceState::Error;
     };
 
     let result = match action {
-        "start" => manager.start_unit(SERVICE, "replace").await,
-        "stop" => manager.stop_unit(SERVICE, "replace").await,
-        _ => return ServiceState::Error,
+        ServiceAction::Start => manager.start_unit(SERVICE, "replace").await,
+        ServiceAction::Stop => manager.stop_unit(SERVICE, "replace").await,
+        ServiceAction::Restart => manager.restart_unit(SERVICE, "replace").await,
     };
 
     match result {
-        Ok(_) => system_service_status().await,
-        Err(_) => ServiceState::Error,
+        Ok(_) => service_status(connection).await,
+        Err(error) => {
+            tracing::error!(?action, %error, "systemd service action failed");
+            ServiceState::Error
+        }
     }
 }
