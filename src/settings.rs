@@ -9,7 +9,7 @@ use crate::config::{
     Connection, ConnectionsConfig, LOCAL_SYSTEM_ID, LOCAL_USER_ID, PollInterval, ServiceScope,
 };
 use crate::credentials;
-use crate::service::ServiceController;
+use crate::service::{ServiceAction, ServiceController, ServiceState};
 use cosmic::iced::advanced::Renderer;
 use cosmic::iced::core::widget::{Operation, Tree, tree};
 use cosmic::iced::core::{Clipboard, Shell, Widget, layout, overlay, renderer};
@@ -24,6 +24,9 @@ pub enum Message {
     SelectConnection(uuid::Uuid),
     PasswordLoaded(Option<String>),
     UsernameLoaded(Option<String>),
+    ServiceStateLoaded(ServiceState),
+    ServiceAction(ServiceAction),
+    ServiceActionFinished(ServiceState),
     TogglePasswordVisibility,
     AddConnection,
     DeleteConnection(uuid::Uuid),
@@ -47,6 +50,8 @@ pub struct SettingsModel {
     selected_connection: Connection,
     password: Option<String>,
     local_username: Option<String>,
+    service_state: Option<ServiceState>,
+    service_action: Option<ServiceAction>,
     password_hidden: bool,
 }
 
@@ -118,6 +123,16 @@ impl Application for SettingsModel {
             })
         };
 
+        let service_state_task = if let Some(scope) = selected_connection.service_scope {
+            cosmic::Task::perform(ServiceController::new(scope).status(), |state| {
+                cosmic::Action::App(Message::ServiceStateLoaded(state))
+            })
+        } else {
+            cosmic::Task::perform(async { ServiceState::Stopped }, |state| {
+                cosmic::Action::App(Message::ServiceStateLoaded(state))
+            })
+        };
+
         (
             Self {
                 core,
@@ -125,9 +140,11 @@ impl Application for SettingsModel {
                 selected_connection,
                 password: None,
                 local_username: None,
+                service_state: None,
+                service_action: None,
                 password_hidden: true,
             },
-            cosmic::Task::batch([password_task, username_task]),
+            cosmic::Task::batch([password_task, username_task, service_state_task]),
         )
     }
 
@@ -151,6 +168,7 @@ impl Application for SettingsModel {
                 self.selected_connection = connection.clone();
                 self.password = None;
                 self.local_username = None;
+                self.service_state = None;
 
                 let password_task =
                     cosmic::Task::perform(credentials::get_password(connection.id), |password| {
@@ -169,7 +187,17 @@ impl Application for SettingsModel {
                     })
                 };
 
-                return cosmic::Task::batch([password_task, username_task]);
+                let service_state_task = if let Some(scope) = connection.service_scope {
+                    cosmic::Task::perform(ServiceController::new(scope).status(), |state| {
+                        cosmic::Action::App(Message::ServiceStateLoaded(state))
+                    })
+                } else {
+                    cosmic::Task::perform(async { ServiceState::Stopped }, |state| {
+                        cosmic::Action::App(Message::ServiceStateLoaded(state))
+                    })
+                };
+
+                return cosmic::Task::batch([password_task, username_task, service_state_task]);
             }
 
             Message::PasswordLoaded(password) => {
@@ -178,6 +206,31 @@ impl Application for SettingsModel {
 
             Message::UsernameLoaded(username) => {
                 self.local_username = username;
+            }
+
+            Message::ServiceStateLoaded(state) => {
+                if self.selected_connection.service_scope.is_some() {
+                    self.service_state = Some(state);
+                }
+            }
+
+            Message::ServiceAction(action) => {
+                let Some(scope) = self.selected_connection.service_scope else {
+                    return cosmic::Task::none();
+                };
+
+                self.service_state = Some(ServiceState::Checking);
+                self.service_action = Some(action);
+
+                return cosmic::Task::perform(
+                    ServiceController::new(scope).action(action),
+                    |state| cosmic::Action::App(Message::ServiceActionFinished(state)),
+                );
+            }
+
+            Message::ServiceActionFinished(state) => {
+                self.service_state = Some(state);
+                self.service_action = None;
             }
 
             Message::TogglePasswordVisibility => {
@@ -201,6 +254,7 @@ impl Application for SettingsModel {
                 self.selected_connection = connection;
                 self.password = None;
                 self.local_username = None;
+                self.service_state = None;
             }
 
             Message::DeleteConnection(id) => {
@@ -233,6 +287,17 @@ impl Application for SettingsModel {
 
                         self.password = None;
                         self.local_username = None;
+                        self.service_state = self
+                            .selected_connection
+                            .service_scope
+                            .map(|_| ServiceState::Checking);
+
+                        if let Some(scope) = self.selected_connection.service_scope {
+                            return cosmic::Task::perform(
+                                ServiceController::new(scope).status(),
+                                |state| cosmic::Action::App(Message::ServiceStateLoaded(state)),
+                            );
+                        }
                     }
 
                     return cosmic::Task::perform(credentials::delete_password(id), |_| {
@@ -482,6 +547,50 @@ impl SettingsModel {
                         .to_string(),
                 );
 
+                let service_state = self.service_state.unwrap_or(ServiceState::Checking);
+                let service_checking = matches!(service_state, ServiceState::Checking);
+
+                let service_status = widget::text(
+                    if self.service_action == Some(ServiceAction::Restart)
+                        && matches!(service_state, ServiceState::Checking)
+                    {
+                        "Restarting…"
+                    } else {
+                        service_state_label(service_state)
+                    },
+                );
+
+                let service_buttons = widget::row::with_children(vec![
+                    widget::button::standard("Start")
+                        .on_press_maybe(
+                            (!service_checking && service_state != ServiceState::Running)
+                                .then_some(Message::ServiceAction(ServiceAction::Start)),
+                        )
+                        .into(),
+                    widget::button::standard("Stop")
+                        .on_press_maybe(
+                            (!service_checking && service_state != ServiceState::Stopped)
+                                .then_some(Message::ServiceAction(ServiceAction::Stop)),
+                        )
+                        .into(),
+                    widget::button::standard("Restart")
+                        .on_press_maybe(
+                            (!service_checking)
+                                .then_some(Message::ServiceAction(ServiceAction::Restart)),
+                        )
+                        .into(),
+                ])
+                .spacing(spacing.space_xxs);
+
+                let service_control = widget::settings::item(
+                    "Transmission service",
+                    widget::column::with_children(vec![
+                        service_status.into(),
+                        service_buttons.into(),
+                    ])
+                    .spacing(spacing.space_xxs),
+                );
+
                 widget::column::with_children(vec![
                     name.into(),
                     host.into(),
@@ -489,6 +598,7 @@ impl SettingsModel {
                     rpc_port.into(),
                     widget::settings::item("Scope", scope).into(),
                     poll_interval.into(),
+                    service_control.into(),
                     widget::settings::item("Active", active_toggle).into(),
                 ])
                 .spacing(spacing.space_s)
@@ -587,6 +697,15 @@ fn active_connection(config: &ConnectionsConfig, selected: uuid::Uuid) -> uuid::
         selected
     } else {
         config.active_connection
+    }
+}
+
+fn service_state_label(state: ServiceState) -> &'static str {
+    match state {
+        ServiceState::Running => "Running",
+        ServiceState::Checking => "Checking…",
+        ServiceState::Stopped => "Stopped",
+        ServiceState::Error => "Error",
     }
 }
 

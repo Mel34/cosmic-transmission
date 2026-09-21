@@ -214,13 +214,23 @@ async fn service_action(connection: &zbus::Connection, action: ServiceAction) ->
         ServiceAction::Restart => manager.restart_unit(SERVICE, "replace").await,
     };
 
-    match result {
-        Ok(_) => service_status(connection).await,
-        Err(error) => {
-            tracing::error!(?action, %error, "systemd service action failed");
-            ServiceState::Error
-        }
+    if let Err(error) = result {
+        tracing::error!(?action, %error, "systemd service action failed");
+        return ServiceState::Error;
     }
+
+    for _ in 0..50 {
+        let state = service_status(connection).await;
+
+        if !matches!(state, ServiceState::Checking) {
+            return state;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    tracing::error!(?action, "timed out waiting for systemd service action");
+    ServiceState::Error
 }
 
 #[cfg(test)]
