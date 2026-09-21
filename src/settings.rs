@@ -350,7 +350,13 @@ impl SettingsModel {
 
             let connection = self.selected_connection();
 
-            let compact_navigation = size.width < 700.0;
+            let navigation_mode = if size.width >= 700.0 {
+                ConnectionNavigationMode::Full
+            } else if size.width >= 520.0 {
+                ConnectionNavigationMode::Compact
+            } else {
+                ConnectionNavigationMode::Minimal
+            };
 
             let connection_list = ConnectionReorderList::new(
                 self.connections_config.connections.clone(),
@@ -359,7 +365,7 @@ impl SettingsModel {
                 Message::SelectConnection,
                 Message::DeleteConnection,
                 Message::ReorderConnections,
-                compact_navigation,
+                navigation_mode,
             );
 
             let selected_is_local = connection.service_scope.is_some();
@@ -496,10 +502,10 @@ impl SettingsModel {
                 .spacing(spacing.space_s)
             };
 
-            let navigation_width = if compact_navigation {
-                Length::Fixed(56.0)
-            } else {
-                Length::Fixed(320.0)
+            let navigation_width = match navigation_mode {
+                ConnectionNavigationMode::Full => Length::Fixed(320.0),
+                ConnectionNavigationMode::Compact => Length::Fixed(160.0),
+                ConnectionNavigationMode::Minimal => Length::Fixed(56.0),
             };
 
             widget::column::with_children(vec![
@@ -554,6 +560,13 @@ impl SettingsModel {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionNavigationMode {
+    Full,
+    Compact,
+    Minimal,
+}
+
 struct ConnectionReorderList<'a, Message> {
     id: cosmic::widget::Id,
     connections: Vec<Connection>,
@@ -578,12 +591,12 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
         on_select: impl Fn(uuid::Uuid) -> Message + 'a,
         on_delete: impl Fn(uuid::Uuid) -> Message + 'a,
         on_reorder: impl Fn(Vec<uuid::Uuid>) -> Message + 'a,
-        compact: bool,
+        navigation_mode: ConnectionNavigationMode,
     ) -> Self {
         let rows = connections
             .iter()
             .map(|connection| {
-                Self::connection_row(connection, selected, active, &on_delete, compact)
+                Self::connection_row(connection, selected, active, &on_delete, navigation_mode)
             })
             .collect();
 
@@ -601,68 +614,9 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
         selected: uuid::Uuid,
         active: uuid::Uuid,
         on_delete: &dyn Fn(uuid::Uuid) -> Message,
-        compact: bool,
+        navigation_mode: ConnectionNavigationMode,
     ) -> Element<'a, Message> {
         let spacing = theme::active().cosmic().spacing;
-
-        if compact {
-            let icon_name = if connection.service_scope.is_some() {
-                "computer-symbolic"
-            } else {
-                "network-server-symbolic"
-            };
-
-            let icon = widget::icon::from_name(icon_name).symbolic(true).size(20);
-
-            let icon = widget::tooltip(
-                icon,
-                widget::text(connection.name.clone()),
-                widget::tooltip::Position::Right,
-            );
-
-            let content = widget::row::with_children(vec![
-                widget::Space::new().width(Length::Fill).into(),
-                icon.into(),
-                widget::Space::new().width(Length::Fill).into(),
-            ])
-            .align_y(Alignment::Center)
-            .height(Length::Fill);
-
-            return widget::container(content)
-                .padding(8)
-                .width(Length::Fill)
-                .class(if connection.id == selected {
-                    theme::Container::Primary
-                } else {
-                    theme::Container::Primary
-                })
-                .into();
-        }
-
-        let label = if connection.id == active {
-            format!("{}  •", connection.name)
-        } else {
-            connection.name.clone()
-        };
-
-        let description = if connection.service_scope.is_some() {
-            match connection.id {
-                LOCAL_USER_ID => "User service".to_string(),
-                LOCAL_SYSTEM_ID => "System service".to_string(),
-                _ => "Local service".to_string(),
-            }
-        } else {
-            format!(
-                "{}:{}{}",
-                connection.host,
-                connection.rpc_port,
-                if connection.username.is_empty() {
-                    String::new()
-                } else {
-                    format!(" · {}", connection.username)
-                }
-            )
-        };
 
         let icon_name = if connection.service_scope.is_some() {
             "computer-symbolic"
@@ -670,46 +624,160 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
             "network-server-symbolic"
         };
 
-        let mut children = vec![
-            widget::icon::from_name("list-drag-handle-symbolic")
-                .symbolic(true)
-                .size(16)
-                .into(),
-            widget::icon::from_name(icon_name)
-                .symbolic(true)
-                .size(20)
-                .into(),
-            widget::column::with_children(vec![
-                widget::text(label).into(),
-                widget::text::caption(description).into(),
-            ])
-            .spacing(spacing.space_xxs)
-            .width(Length::Fill)
-            .into(),
-        ];
+        let is_active = connection.id == active;
 
-        if connection.service_scope.is_none() {
-            children.push(
-                widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
-                    .extra_small()
-                    .on_press(on_delete(connection.id))
+        match navigation_mode {
+            ConnectionNavigationMode::Minimal => {
+                let icon = widget::icon::from_name(icon_name).symbolic(true).size(20);
+
+                let icon = widget::tooltip(
+                    icon,
+                    widget::text(connection.name.clone()),
+                    widget::tooltip::Position::Right,
+                );
+
+                let content = widget::row::with_children(vec![
+                    widget::Space::new().width(Length::Fill).into(),
+                    icon.into(),
+                    widget::Space::new().width(Length::Fill).into(),
+                ])
+                .align_y(Alignment::Center)
+                .height(Length::Fill);
+
+                let content: Element<'a, Message> = if is_active {
+                    let active_indicator = widget::text("●").size(8).class(theme::Text::Color(
+                        theme::active().cosmic().success_color().into(),
+                    ));
+
+                    cosmic::iced::widget::stack([
+                        content.into(),
+                        widget::container(active_indicator)
+                            .width(Length::Fill)
+                            .height(Length::Fixed(20.0))
+                            .align_x(Alignment::End)
+                            .align_y(Alignment::Center)
+                            .into(),
+                    ])
+                    .into()
+                } else {
+                    content.into()
+                };
+
+                widget::container(content)
+                    .padding(8)
+                    .width(Length::Fill)
+                    .class(if connection.id == selected {
+                        theme::Container::Primary
+                    } else {
+                        theme::Container::Primary
+                    })
+                    .into()
+            }
+
+            ConnectionNavigationMode::Compact => {
+                let icon = widget::icon::from_name(icon_name).symbolic(true).size(20);
+
+                let mut children = vec![icon.into(), widget::text(connection.name.clone()).into()];
+
+                if is_active {
+                    children.push(
+                        widget::text("•")
+                            .size(24)
+                            .class(theme::Text::Color(
+                                theme::active().cosmic().success_color().into(),
+                            ))
+                            .into(),
+                    );
+                }
+
+                let content = widget::row::with_children(children)
+                    .spacing(spacing.space_s)
+                    .align_y(Alignment::Center);
+
+                widget::container(content)
+                    .padding(8)
+                    .width(Length::Fill)
+                    .class(if connection.id == selected {
+                        theme::Container::Primary
+                    } else {
+                        theme::Container::Primary
+                    })
+                    .into()
+            }
+
+            ConnectionNavigationMode::Full => {
+                let description = if connection.service_scope.is_some() {
+                    match connection.id {
+                        LOCAL_USER_ID => "User service".to_string(),
+                        LOCAL_SYSTEM_ID => "System service".to_string(),
+                        _ => "Local service".to_string(),
+                    }
+                } else {
+                    format!(
+                        "{}:{}{}",
+                        connection.host,
+                        connection.rpc_port,
+                        if connection.username.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", connection.username)
+                        }
+                    )
+                };
+
+                let mut children = vec![
+                    widget::icon::from_name("list-drag-handle-symbolic")
+                        .symbolic(true)
+                        .size(16)
+                        .into(),
+                    widget::icon::from_name(icon_name)
+                        .symbolic(true)
+                        .size(20)
+                        .into(),
+                    widget::column::with_children(vec![
+                        widget::text(connection.name.clone()).into(),
+                        widget::text::caption(description).into(),
+                    ])
+                    .spacing(spacing.space_xxs)
+                    .width(Length::Fill)
                     .into(),
-            );
+                ];
+
+                if is_active {
+                    children.push(
+                        widget::text("•")
+                            .size(24)
+                            .class(theme::Text::Color(
+                                theme::active().cosmic().success_color().into(),
+                            ))
+                            .into(),
+                    );
+                }
+
+                if connection.service_scope.is_none() {
+                    children.push(
+                        widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
+                            .extra_small()
+                            .on_press(on_delete(connection.id))
+                            .into(),
+                    );
+                }
+
+                let content = widget::row::with_children(children)
+                    .spacing(spacing.space_s)
+                    .align_y(Alignment::Center);
+
+                widget::container(content)
+                    .padding(8)
+                    .width(Length::Fill)
+                    .class(if connection.id == selected {
+                        theme::Container::Primary
+                    } else {
+                        theme::Container::Primary
+                    })
+                    .into()
+            }
         }
-
-        let content = widget::row::with_children(children)
-            .spacing(spacing.space_s)
-            .align_y(Alignment::Center);
-
-        widget::container(content)
-            .padding(8)
-            .width(Length::Fill)
-            .class(if connection.id == selected {
-                theme::Container::Primary
-            } else {
-                theme::Container::Primary
-            })
-            .into()
     }
 
     fn row_at(&self, list_layout: layout::Layout<'_>, position: Point) -> Option<usize> {
