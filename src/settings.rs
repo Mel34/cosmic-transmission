@@ -1267,7 +1267,7 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
             ConnectionNavigationMode::Compact => {
                 let icon = widget::icon::from_name(icon_name).symbolic(true).size(20);
 
-                let mut children = vec![icon.into(), widget::text(connection.name.clone()).into()];
+                let children = vec![icon.into(), widget::text(connection.name.clone()).into()];
                 
                 let content = widget::row::with_children(children)
                     .spacing(spacing.space_s)
