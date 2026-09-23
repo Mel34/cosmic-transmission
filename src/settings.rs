@@ -42,7 +42,6 @@ pub enum Message {
     AddConnection,
     DeleteConnection(uuid::Uuid),
     ReorderConnections(Vec<uuid::Uuid>),
-    SetActiveConnection,
     NameChanged(String),
     HostChanged(String),
     UsernameChanged(String),
@@ -577,11 +576,6 @@ impl Application for SettingsModel {
                     reorder_connections(&self.connections_config.connections, &ids);
             }
 
-            Message::SetActiveConnection => {
-                self.connections_config.active_connection =
-                    active_connection(&self.connections_config, self.selected_connection.id);
-            }
-
             Message::NameChanged(name) => {
                 let id = self.selected_connection.id;
 
@@ -859,16 +853,6 @@ impl SettingsModel {
                 .width(Length::Fixed(220.0)),
             );
 
-            let is_active = connection.id == self.connections_config.active_connection;
-
-            let active_toggle = widget::toggler(is_active);
-
-            let active_toggle = if is_active {
-                active_toggle
-            } else {
-                active_toggle.on_toggle(|_| Message::SetActiveConnection)
-            };
-
             let details = if selected_is_local {
                 let scope = widget::text(
                     connection
@@ -942,7 +926,6 @@ impl SettingsModel {
                     widget::settings::item("Scope", scope).into(),
                     poll_interval.into(),
                     service_control.into(),
-                    widget::settings::item("Active", active_toggle).into(),
                 ])
                 .spacing(spacing.space_s)
             } else {
@@ -967,7 +950,6 @@ impl SettingsModel {
                     .spacing(spacing.space_xxs)
                     .into(),
                     poll_interval.into(),
-                    widget::settings::item("Active", active_toggle).into(),
                 ])
                 .spacing(spacing.space_s)
             };
@@ -1032,18 +1014,6 @@ impl SettingsModel {
 
 fn can_delete_connection(id: uuid::Uuid) -> bool {
     id != LOCAL_USER_ID && id != LOCAL_SYSTEM_ID
-}
-
-fn active_connection(config: &ConnectionsConfig, selected: uuid::Uuid) -> uuid::Uuid {
-    if config
-        .connections
-        .iter()
-        .any(|connection| connection.id == selected)
-    {
-        selected
-    } else {
-        config.active_connection
-    }
 }
 
 fn service_state_label(state: ServiceState) -> &'static str {
@@ -1780,52 +1750,6 @@ mod tests {
         let id = uuid::Uuid::new_v4();
 
         assert!(can_delete_connection(id));
-    }
-
-    #[test]
-    fn active_connection_accepts_existing_selection() {
-        let remote_id = uuid::Uuid::new_v4();
-
-        let config = ConnectionsConfig {
-            connections: vec![
-                Connection {
-                    id: LOCAL_USER_ID,
-                    name: "Local User".to_string(),
-                    host: "localhost".to_string(),
-                    rpc_port: 9091,
-                    username: String::new(),
-                    service_scope: Some(ServiceScope::User),
-                    poll_interval: PollInterval::TwoSeconds,
-                },
-                test_connection(remote_id, "Remote"),
-            ],
-            active_connection: LOCAL_USER_ID,
-        };
-
-        assert_eq!(active_connection(&config, remote_id), remote_id);
-    }
-
-    #[test]
-    fn active_connection_falls_back_to_configured_active_connection() {
-        let remote_id = uuid::Uuid::new_v4();
-
-        let config = ConnectionsConfig {
-            connections: vec![
-                Connection {
-                    id: LOCAL_USER_ID,
-                    name: "Local User".to_string(),
-                    host: "localhost".to_string(),
-                    rpc_port: 9091,
-                    username: String::new(),
-                    service_scope: Some(ServiceScope::User),
-                    poll_interval: PollInterval::TwoSeconds,
-                },
-                test_connection(remote_id, "Remote"),
-            ],
-            active_connection: remote_id,
-        };
-
-        assert_eq!(active_connection(&config, uuid::Uuid::new_v4()), remote_id);
     }
 
     #[test]
