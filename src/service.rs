@@ -49,6 +49,18 @@ impl ServiceController {
         }
     }
 
+    pub async fn apply_configuration(
+        self,
+        rpc_port: u16,
+        rpc_username: &str,
+    ) -> Result<(), String> {
+        match self {
+            Self::Systemd(controller) => {
+                controller.apply_configuration(rpc_port, rpc_username).await
+            }
+        }
+    }
+
     pub async fn username(self) -> Option<String> {
         match self {
             Self::Systemd(controller) => controller.username().await,

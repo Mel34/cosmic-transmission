@@ -27,10 +27,17 @@ pub enum Message {
     PasswordLoaded(Option<String>),
     ServiceConfigurationLoaded(ServiceConfiguration),
     ServiceStateLoaded(ServiceState),
+    ConfigurationStateLoaded(uuid::Uuid, ServiceState),
     ServiceAction(ServiceAction),
     SetupService,
     ServiceActionFinished(ServiceState),
     ServiceSetupFinished(ServiceConfiguration, ServiceState),
+    ApplyConfiguration,
+    ConfigurationApplied(uuid::Uuid, ServiceScope, Result<(), String>),
+    UndoName,
+    UndoHost,
+    UndoUsername,
+    UndoRpcPort,
     TogglePasswordVisibility,
     AddConnection,
     DeleteConnection(uuid::Uuid),
@@ -48,14 +55,46 @@ pub enum Message {
     Close,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppliedConfiguration {
+    name: String,
+    host: String,
+    username: String,
+    rpc_port: u16,
+}
+
+impl AppliedConfiguration {
+    fn from_connection(connection: &Connection) -> Self {
+        Self {
+            name: connection.name.clone(),
+            host: connection.host.clone(),
+            username: connection.username.clone(),
+            rpc_port: connection.rpc_port,
+        }
+    }
+
+    fn matches(&self, connection: &Connection) -> bool {
+        self.name == connection.name
+            && self.host == connection.host
+            && self.username == connection.username
+            && self.rpc_port == connection.rpc_port
+    }
+
+    fn rpc_matches(&self, connection: &Connection) -> bool {
+        self.username == connection.username && self.rpc_port == connection.rpc_port
+    }
+}
+
 pub struct SettingsModel {
     core: cosmic::Core,
     connections_config: ConnectionsConfig,
     selected_connection: Connection,
+    applied_configuration: AppliedConfiguration,
     password: Option<String>,
     service_configuration: Option<ServiceConfiguration>,
     service_state: Option<ServiceState>,
     service_action: Option<ServiceAction>,
+    configuration_applying: bool,
     password_hidden: bool,
 }
 
@@ -108,6 +147,8 @@ impl Application for SettingsModel {
             })
             .expect("Active connection must exist");
 
+        let applied_configuration = AppliedConfiguration::from_connection(&selected_connection);
+
         let password_task = cosmic::Task::perform(
             credentials::get_password(selected_connection.id),
             |password| {
@@ -148,10 +189,12 @@ impl Application for SettingsModel {
                 core,
                 connections_config,
                 selected_connection,
+                applied_configuration,
                 password: None,
                 service_configuration: None,
                 service_state: None,
                 service_action: None,
+                configuration_applying: false,
                 password_hidden: true,
             },
             cosmic::Task::batch([
@@ -180,9 +223,12 @@ impl Application for SettingsModel {
                 };
 
                 self.selected_connection = connection.clone();
+                self.applied_configuration = AppliedConfiguration::from_connection(&connection);
                 self.password = None;
                 self.service_configuration = None;
                 self.service_state = None;
+                self.service_action = None;
+                self.configuration_applying = false;
 
                 let password_task =
                     cosmic::Task::perform(credentials::get_password(connection.id), |password| {
@@ -208,9 +254,10 @@ impl Application for SettingsModel {
                 };
 
                 let service_state_task = if let Some(scope) = connection.service_scope {
-                    cosmic::Task::perform(ServiceController::new(scope).status(), |state| {
-                        cosmic::Action::App(Message::ServiceStateLoaded(state))
-                    })
+                    cosmic::Task::perform(
+                        ServiceController::new(scope).status(),
+                        |state| cosmic::Action::App(Message::ServiceStateLoaded(state)),
+                    )
                 } else {
                     cosmic::Task::perform(async { ServiceState::Stopped }, |state| {
                         cosmic::Action::App(Message::ServiceStateLoaded(state))
@@ -236,6 +283,12 @@ impl Application for SettingsModel {
 
             Message::ServiceStateLoaded(state) => {
                 if self.selected_connection.service_scope.is_some() {
+                    self.service_state = Some(state);
+                }
+            }
+
+            Message::ConfigurationStateLoaded(id, state) => {
+                if self.selected_connection.id == id {
                     self.service_state = Some(state);
                 }
             }
@@ -293,6 +346,135 @@ impl Application for SettingsModel {
                 self.service_state = Some(state);
             }
 
+            Message::ApplyConfiguration => {
+                if self.applied_configuration.matches(&self.selected_connection)
+                    || self.configuration_applying
+                {
+                    return cosmic::Task::none();
+                }
+
+                let connection = self.selected_connection.clone();
+
+                if let Some(scope) = connection.service_scope {
+                    if self.applied_configuration.rpc_matches(&connection) {
+                        self.save_config();
+                        self.applied_configuration =
+                            AppliedConfiguration::from_connection(&connection);
+                        return cosmic::Task::none();
+                    }
+
+                    self.configuration_applying = true;
+
+                    let id = connection.id;
+                    let rpc_port = connection.rpc_port;
+                    let rpc_username = connection.username;
+
+                    return cosmic::Task::perform(
+                        async move {
+                            ServiceController::new(scope)
+                                .apply_configuration(rpc_port, &rpc_username)
+                                .await
+                        },
+                        move |result| {
+                            cosmic::Action::App(Message::ConfigurationApplied(id, scope, result))
+                        },
+                    );
+                }
+
+                self.save_config();
+                self.applied_configuration = AppliedConfiguration::from_connection(&connection);
+            }
+
+            Message::ConfigurationApplied(id, scope, result) => {
+                self.configuration_applying = false;
+
+                if self.selected_connection.id != id {
+                    return cosmic::Task::none();
+                }
+
+                match result {
+                    Ok(()) => {
+                        self.save_config();
+                        self.applied_configuration =
+                            AppliedConfiguration::from_connection(&self.selected_connection);
+
+                        return cosmic::Task::perform(
+                            ServiceController::new(scope).status(),
+                            move |state| {
+                                cosmic::Action::App(Message::ConfigurationStateLoaded(id, state))
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "failed to apply Transmission configuration");
+                    }
+                }
+            }
+
+            Message::UndoName => {
+                let name = self.applied_configuration.name.clone();
+                let id = self.selected_connection.id;
+
+                self.selected_connection.name = name.clone();
+
+                if let Some(connection) = self
+                    .connections_config
+                    .connections
+                    .iter_mut()
+                    .find(|connection| connection.id == id)
+                {
+                    connection.name = name;
+                }
+            }
+
+            Message::UndoHost => {
+                let host = self.applied_configuration.host.clone();
+                let id = self.selected_connection.id;
+
+                self.selected_connection.host = host.clone();
+
+                if let Some(connection) = self
+                    .connections_config
+                    .connections
+                    .iter_mut()
+                    .find(|connection| connection.id == id)
+                {
+                    connection.host = host;
+                }
+            }
+
+            Message::UndoUsername => {
+                let username = self.applied_configuration.username.clone();
+                let id = self.selected_connection.id;
+
+                self.selected_connection.username = username.clone();
+
+                if let Some(connection) = self
+                    .connections_config
+                    .connections
+                    .iter_mut()
+                    .find(|connection| connection.id == id)
+                {
+                    connection.username = username;
+                }
+            }
+
+            Message::UndoRpcPort => {
+                let rpc_port = self.applied_configuration.rpc_port;
+                let id = self.selected_connection.id;
+
+                self.selected_connection.rpc_port = rpc_port;
+
+                if let Some(connection) = self
+                    .connections_config
+                    .connections
+                    .iter_mut()
+                    .find(|connection| connection.id == id)
+                {
+                    connection.rpc_port = rpc_port;
+                }
+            }
+
             Message::TogglePasswordVisibility => {
                 self.password_hidden = !self.password_hidden;
             }
@@ -311,10 +493,13 @@ impl Application for SettingsModel {
                 };
 
                 self.connections_config.connections.push(connection.clone());
-                self.selected_connection = connection;
+                self.selected_connection = connection.clone();
+                self.applied_configuration = AppliedConfiguration::from_connection(&connection);
                 self.password = None;
                 self.service_configuration = None;
                 self.service_state = None;
+                self.service_action = None;
+                self.configuration_applying = false;
             }
 
             Message::DeleteConnection(id) => {
@@ -345,6 +530,8 @@ impl Application for SettingsModel {
                             .cloned()
                             .expect("Local User connection must exist");
 
+                        self.applied_configuration =
+                            AppliedConfiguration::from_connection(&self.selected_connection);
                         self.password = None;
                         self.service_configuration = self
                             .selected_connection
@@ -354,6 +541,8 @@ impl Application for SettingsModel {
                             .selected_connection
                             .service_scope
                             .map(|_| ServiceState::Checking);
+                        self.service_action = None;
+                        self.configuration_applying = false;
 
                         if let Some(scope) = self.selected_connection.service_scope {
                             let service_configuration_task = cosmic::Task::perform(
@@ -553,11 +742,55 @@ impl SettingsModel {
             );
 
             let selected_is_local = connection.service_scope.is_some();
+            let configuration_changed = !self.applied_configuration.matches(connection);
+
+            let rpc_configuration_changed = !self.applied_configuration.rpc_matches(connection);
+
+            let name_undo = widget::icon::from_name("edit-undo-symbolic")
+                .symbolic(true)
+                .size(16)
+                .apply(widget::button::custom)
+                .class(theme::Button::Icon)
+                .on_press_maybe(
+                    (connection.name != self.applied_configuration.name)
+                        .then_some(Message::UndoName),
+                );
+
+            let host_undo = widget::icon::from_name("edit-undo-symbolic")
+                .symbolic(true)
+                .size(16)
+                .apply(widget::button::custom)
+                .class(theme::Button::Icon)
+                .on_press_maybe(
+                    (connection.host != self.applied_configuration.host)
+                        .then_some(Message::UndoHost),
+                );
+
+            let username_undo = widget::icon::from_name("edit-undo-symbolic")
+                .symbolic(true)
+                .size(16)
+                .apply(widget::button::custom)
+                .class(theme::Button::Icon)
+                .on_press_maybe(
+                    (connection.username != self.applied_configuration.username)
+                        .then_some(Message::UndoUsername),
+                );
+
+            let rpc_port_undo = widget::icon::from_name("edit-undo-symbolic")
+                .symbolic(true)
+                .size(16)
+                .apply(widget::button::custom)
+                .class(theme::Button::Icon)
+                .on_press_maybe(
+                    (connection.rpc_port != self.applied_configuration.rpc_port)
+                        .then_some(Message::UndoRpcPort),
+                );
 
             let name = widget::settings::item(
                 "Name",
                 widget::text_input("", &connection.name)
                     .on_input(Message::NameChanged)
+                    .trailing_icon(name_undo.into())
                     .width(Length::Fixed(220.0)),
             );
 
@@ -565,6 +798,7 @@ impl SettingsModel {
                 "Host",
                 widget::text_input("localhost", &connection.host)
                     .on_input(Message::HostChanged)
+                    .trailing_icon(host_undo.into())
                     .width(Length::Fixed(220.0)),
             );
 
@@ -572,6 +806,7 @@ impl SettingsModel {
                 "Username",
                 widget::text_input("Username", &connection.username)
                     .on_input(Message::UsernameChanged)
+                    .trailing_icon(username_undo.into())
                     .width(Length::Fixed(220.0)),
             );
 
@@ -579,8 +814,21 @@ impl SettingsModel {
                 "RPC port",
                 widget::text_input("9091", connection.rpc_port.to_string())
                     .on_input(Message::RpcPortChanged)
+                    .trailing_icon(rpc_port_undo.into())
                     .width(Length::Fixed(220.0)),
             );
+
+            let apply_button = if configuration_changed {
+                widget::button::suggested("Apply")
+                    .on_press_maybe(
+                        (!self.configuration_applying)
+                            .then_some(Message::ApplyConfiguration),
+                    )
+            } else {
+                widget::button::standard("Apply").on_press_maybe(None)
+            };
+
+            let apply = widget::settings::item("Configuration", apply_button);
 
             let poll_interval = widget::settings::item(
                 "Polling interval",
@@ -607,6 +855,7 @@ impl SettingsModel {
                     self.password_hidden,
                 )
                 .on_input(Message::PasswordChanged)
+                .padding(5)
                 .width(Length::Fixed(220.0)),
             );
 
@@ -650,19 +899,23 @@ impl SettingsModel {
                         let service_buttons = widget::row::with_children(vec![
                             widget::button::standard("Start")
                                 .on_press_maybe(
-                                    (!service_checking && service_state != ServiceState::Running)
+                                    (!service_checking
+                                        && !self.configuration_applying
+                                        && service_state != ServiceState::Running)
                                         .then_some(Message::ServiceAction(ServiceAction::Start)),
                                 )
                                 .into(),
                             widget::button::standard("Stop")
                                 .on_press_maybe(
-                                    (!service_checking && service_state != ServiceState::Stopped)
+                                    (!service_checking
+                                        && !self.configuration_applying
+                                        && service_state != ServiceState::Stopped)
                                         .then_some(Message::ServiceAction(ServiceAction::Stop)),
                                 )
                                 .into(),
                             widget::button::standard("Restart")
                                 .on_press_maybe(
-                                    (!service_checking)
+                                    (!service_checking && !self.configuration_applying)
                                         .then_some(Message::ServiceAction(ServiceAction::Restart)),
                                 )
                                 .into(),
@@ -685,6 +938,7 @@ impl SettingsModel {
                     host.into(),
                     username.into(),
                     rpc_port.into(),
+                    apply.into(),
                     widget::settings::item("Scope", scope).into(),
                     poll_interval.into(),
                     service_control.into(),
@@ -692,11 +946,14 @@ impl SettingsModel {
                 ])
                 .spacing(spacing.space_s)
             } else {
+                let _ = rpc_configuration_changed;
+
                 widget::column::with_children(vec![
                     name.into(),
                     host.into(),
                     username.into(),
                     rpc_port.into(),
+                    apply.into(),
                     password.into(),
                     widget::row::with_children(vec![
                         widget::Space::new().width(Length::Fill).into(),
@@ -1448,6 +1705,68 @@ mod tests {
             service_scope: None,
             poll_interval: PollInterval::TwoSeconds,
         }
+    }
+
+    #[test]
+    fn applied_configuration_matches_connection() {
+        let id = uuid::Uuid::new_v4();
+        let connection = test_connection(id, "Test");
+        let applied = AppliedConfiguration::from_connection(&connection);
+
+        assert!(applied.matches(&connection));
+        assert!(applied.rpc_matches(&connection));
+    }
+
+    #[test]
+    fn applied_configuration_detects_name_change() {
+        let id = uuid::Uuid::new_v4();
+        let connection = test_connection(id, "Test");
+        let applied = AppliedConfiguration::from_connection(&connection);
+
+        let mut changed = connection.clone();
+        changed.name = "Changed".to_string();
+
+        assert!(!applied.matches(&changed));
+        assert!(applied.rpc_matches(&changed));
+    }
+
+    #[test]
+    fn applied_configuration_detects_host_change() {
+        let id = uuid::Uuid::new_v4();
+        let connection = test_connection(id, "Test");
+        let applied = AppliedConfiguration::from_connection(&connection);
+
+        let mut changed = connection.clone();
+        changed.host = "example.com".to_string();
+
+        assert!(!applied.matches(&changed));
+        assert!(applied.rpc_matches(&changed));
+    }
+
+    #[test]
+    fn applied_configuration_detects_username_change() {
+        let id = uuid::Uuid::new_v4();
+        let connection = test_connection(id, "Test");
+        let applied = AppliedConfiguration::from_connection(&connection);
+
+        let mut changed = connection.clone();
+        changed.username = "user".to_string();
+
+        assert!(!applied.matches(&changed));
+        assert!(!applied.rpc_matches(&changed));
+    }
+
+    #[test]
+    fn applied_configuration_detects_rpc_port_change() {
+        let id = uuid::Uuid::new_v4();
+        let connection = test_connection(id, "Test");
+        let applied = AppliedConfiguration::from_connection(&connection);
+
+        let mut changed = connection.clone();
+        changed.rpc_port = 1234;
+
+        assert!(!applied.matches(&changed));
+        assert!(!applied.rpc_matches(&changed));
     }
 
     #[test]
