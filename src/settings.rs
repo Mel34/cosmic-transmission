@@ -1084,9 +1084,15 @@ fn add_connection_row(navigation_mode: ConnectionNavigationMode) -> Element<'sta
         }
     };
 
+
+    let vertical_padding = match navigation_mode {
+        ConnectionNavigationMode::Full => 20,
+        ConnectionNavigationMode::Compact | ConnectionNavigationMode::Minimal => 8,
+    };
+
     widget::mouse_area(
         widget::container(content)
-            .padding([20, 8])
+            .padding([vertical_padding, 8])
             .width(Length::Fill)
             .class(theme::Container::Primary),
     )
@@ -1190,6 +1196,15 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
         }
     }
 
+    fn active_indicator() -> Element<'a, Message> {
+        widget::text("●")
+            .size(8)
+            .class(theme::Text::Color(
+                theme::active().cosmic().success_color().into(),
+            ))
+            .into()
+    }
+
     fn connection_row(
         connection: &Connection,
         _selected: uuid::Uuid,
@@ -1226,15 +1241,13 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
                 .height(Length::Fill);
 
                 let content: Element<'a, Message> = if is_active {
-                    let active_indicator = widget::text("●").size(8).class(theme::Text::Color(
-                        theme::active().cosmic().success_color().into(),
-                    ));
+                    let active_indicator = Self::active_indicator();
 
                     cosmic::iced::widget::stack([
                         content.into(),
                         widget::container(active_indicator)
                             .width(Length::Fill)
-                            .height(Length::Fixed(20.0))
+                            .height(Length::Fill)
                             .align_x(Alignment::End)
                             .align_y(Alignment::Center)
                             .into(),
@@ -1255,27 +1268,30 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
                 let icon = widget::icon::from_name(icon_name).symbolic(true).size(20);
 
                 let mut children = vec![icon.into(), widget::text(connection.name.clone()).into()];
-
-                if is_active {
-                    children.push(
-                        widget::text("•")
-                            .size(24)
-                            .class(theme::Text::Color(
-                                theme::active().cosmic().success_color().into(),
-                            ))
-                            .into(),
-                    );
-                }
-
+                
                 let content = widget::row::with_children(children)
                     .spacing(spacing.space_s)
                     .align_y(Alignment::Center);
 
-                widget::container(content)
-                    .padding(8)
-                    .width(Length::Fill)
-                    .class(theme::Container::Primary)
+                let content: Element<'a, Message> = if is_active {
+                    let active_indicator = Self::active_indicator();
+
+                    cosmic::iced::widget::row::with_children(vec![
+                        content.into(),
+                        active_indicator.into(),
+                    ])
+                    .spacing(spacing.space_s)
+                    .align_y(Alignment::Center)
                     .into()
+            } else {
+                content.into()
+            };
+
+            widget::container(content)
+                .padding(8)
+                .width(Length::Fill)
+                .class(theme::Container::Primary)
+                .into()
             }
 
             ConnectionNavigationMode::Full => {
@@ -1298,7 +1314,7 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
                     )
                 };
 
-                let mut children = vec![
+                                let mut children = vec![
                     widget::icon::from_name("list-drag-handle-symbolic")
                         .symbolic(true)
                         .size(16)
@@ -1316,17 +1332,6 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
                     .into(),
                 ];
 
-                if is_active {
-                    children.push(
-                        widget::text("•")
-                            .size(24)
-                            .class(theme::Text::Color(
-                                theme::active().cosmic().success_color().into(),
-                            ))
-                            .into(),
-                    );
-                }
-
                 if connection.service_scope.is_none() {
                     children.push(
                         widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
@@ -1339,6 +1344,23 @@ impl<'a, Message: 'static + Clone> ConnectionReorderList<'a, Message> {
                 let content = widget::row::with_children(children)
                     .spacing(spacing.space_s)
                     .align_y(Alignment::Center);
+
+                let content: Element<'a, Message> = if is_active {
+                    let active_indicator = Self::active_indicator();
+
+                    cosmic::iced::widget::stack([
+                        content.into(),
+                        widget::container(active_indicator)
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .align_x(Alignment::End)
+                            .align_y(Alignment::Center)
+                            .into(),
+                    ])
+                    .into()
+                } else {
+                    content.into()
+                };
 
                 widget::container(content)
                     .padding(8)
