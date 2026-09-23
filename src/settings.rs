@@ -979,10 +979,11 @@ impl SettingsModel {
                     widget::column::with_children(vec![
                         widget::scrollable(connection_list)
                             .width(Length::Fill)
-                            .height(Length::Fill)
+                            .height(Length::Shrink)
                             .into(),
                         widget::divider::horizontal::default().into(),
                         add_connection.into(),
+                        widget::Space::new().height(Length::Fill).into(),
                     ])
                     .width(navigation_width)
                     .height(Length::Fill)
