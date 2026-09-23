@@ -12,9 +12,10 @@ secret-service = { version = "5.2", default-features = false, features = ["rt-to
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["serde", "v4"] }
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "macros", "rt"] }
 tracing = "0.1"
 zbus = { version = "5.15", default-features = false, features = ["tokio"] }
+zbus_polkit = { version = "5.1.0", default-features = false, features = ["tokio"] }
 cosmic-config = { git = "https://github.com/pop-os/libcosmic.git", rev = "7e82198ab1aba712640b0167e58ad37bf03012ca", package = "cosmic-config", features = ["dbus", "tokio"] }
 
 [dev-dependencies]

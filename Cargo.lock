@@ -1144,6 +1144,7 @@ dependencies = [
  "tracing",
  "uuid",
  "zbus",
+ "zbus_polkit",
 ]
 
 [[package]]
@@ -7060,6 +7061,19 @@ dependencies = [
  "serde",
  "winnow",
  "zvariant",
+]
+
+[[package]]
+name = "zbus_polkit"
+version = "5.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "283d50dac36a7fee0d9c2e6b9c71253326c1f863a9d350342d338637aa3019ae"
+dependencies = [
+ "enumflags2",
+ "serde",
+ "serde_repr",
+ "static_assertions",
+ "zbus",
 ]
 
 [[package]]

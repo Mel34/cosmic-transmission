@@ -1,0 +1,9 @@
+[Unit]
+Description=COSMIC Transmission privileged helper
+
+[Service]
+Type=dbus
+BusName=io.github.cosmic.Transmission.Helper
+ExecStart=/usr/bin/cosmic-transmission-helper
+User=root
+Restart=on-failure

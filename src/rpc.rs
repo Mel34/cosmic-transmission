@@ -53,6 +53,10 @@ struct RpcResponse {
 #[derive(Debug, serde::Deserialize)]
 struct RpcArguments {
     torrents: Option<Vec<RpcTorrent>>,
+    #[serde(rename = "rpc-port")]
+    rpc_port: Option<u16>,
+    #[serde(rename = "rpc-username")]
+    rpc_username: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -73,6 +77,31 @@ struct RpcRequest<'a> {
 #[derive(Debug, serde::Serialize)]
 struct RpcRequestArguments {
     fields: [&'static str; 3],
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SessionSetRequest<'a> {
+    method: &'a str,
+    arguments: SessionSetArguments<'a>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SessionSetArguments<'a> {
+    #[serde(rename = "rpc-port")]
+    rpc_port: u16,
+    #[serde(rename = "rpc-username")]
+    rpc_username: &'a str,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SessionGetRequest<'a> {
+    method: &'a str,
+    arguments: SessionGetArguments,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SessionGetArguments {
+    fields: [&'static str; 2],
 }
 
 pub async fn query_connection(
@@ -212,6 +241,175 @@ pub async fn query_stats(
     (None, session_id)
 }
 
+pub async fn apply_connection_settings(
+    rpc_client: RpcClient,
+    session_id: Option<String>,
+    connection: &Connection,
+) -> (bool, Option<String>) {
+    let request = SessionSetRequest {
+        method: "session-set",
+        arguments: SessionSetArguments {
+            rpc_port: connection.rpc_port,
+            rpc_username: &connection.username,
+        },
+    };
+
+    let password = if rpc_client.username.is_some() {
+        credentials::get_password(rpc_client.connection_id).await
+    } else {
+        None
+    };
+
+    let (response, session_id) =
+        send_rpc_request(&rpc_client, session_id, &request, password.as_ref()).await;
+
+    let Some(response) = response else {
+        return (false, session_id);
+    };
+
+    if response.result != "success" {
+        tracing::warn!(
+            result = %response.result,
+            "Transmission session-set returned an error"
+        );
+        return (false, session_id);
+    }
+
+    let verification_client = RpcClient::new(connection);
+    let request = SessionGetRequest {
+        method: "session-get",
+        arguments: SessionGetArguments {
+            fields: ["rpc-port", "rpc-username"],
+        },
+    };
+
+    let password = if verification_client.username.is_some() {
+        credentials::get_password(verification_client.connection_id).await
+    } else {
+        None
+    };
+
+    let (response, session_id) = send_rpc_request(
+        &verification_client,
+        session_id,
+        &request,
+        password.as_ref(),
+    )
+    .await;
+
+    let Some(response) = response else {
+        return (false, session_id);
+    };
+
+    let Some(arguments) = response.arguments else {
+        tracing::warn!("Transmission session-get response did not contain arguments");
+        return (false, session_id);
+    };
+
+    let rpc_port_matches = arguments.rpc_port == Some(connection.rpc_port);
+    let rpc_username_matches =
+        arguments.rpc_username.as_deref() == Some(connection.username.as_str());
+
+    if !rpc_port_matches || !rpc_username_matches {
+        tracing::warn!(
+            expected_port = connection.rpc_port,
+            actual_port = ?arguments.rpc_port,
+            expected_username = %connection.username,
+            actual_username = ?arguments.rpc_username,
+            "Transmission session settings verification failed"
+        );
+        return (false, session_id);
+    }
+
+    (true, session_id)
+}
+
+async fn send_rpc_request<T: serde::Serialize>(
+    rpc_client: &RpcClient,
+    session_id: Option<String>,
+    request: &T,
+    password: Option<&secrecy::SecretString>,
+) -> (Option<RpcResponse>, Option<String>) {
+    let mut request_builder = rpc_client.client.post(&rpc_client.url).json(request);
+
+    if let Some(username) = rpc_client.username.as_deref() {
+        request_builder =
+            request_builder.basic_auth(username, password.map(|password| password.expose_secret()));
+    }
+
+    if let Some(session_id) = session_id.as_deref() {
+        request_builder = request_builder.header("X-Transmission-Session-Id", session_id);
+    }
+
+    let response = match request_builder.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, "Transmission RPC request failed");
+            return (None, session_id);
+        }
+    };
+
+    if response.status() == reqwest::StatusCode::CONFLICT {
+        let new_session_id = response
+            .headers()
+            .get("X-Transmission-Session-Id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+
+        let Some(new_session_id) = new_session_id else {
+            tracing::warn!("Transmission RPC response did not include a session ID");
+            return (None, None);
+        };
+
+        let mut retry_request = rpc_client
+            .client
+            .post(&rpc_client.url)
+            .header("X-Transmission-Session-Id", &new_session_id)
+            .json(request);
+
+        if let Some(username) = rpc_client.username.as_deref() {
+            retry_request = retry_request
+                .basic_auth(username, password.map(|password| password.expose_secret()));
+        }
+
+        let response = match retry_request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(%error, "Transmission RPC retry failed");
+                return (None, Some(new_session_id));
+            }
+        };
+
+        let response = match response.json::<RpcResponse>().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(%error, "failed to parse Transmission RPC response");
+                return (None, Some(new_session_id));
+            }
+        };
+
+        return (Some(response), Some(new_session_id));
+    }
+
+    if !response.status().is_success() {
+        tracing::warn!(
+            status = %response.status(),
+            "Transmission RPC request returned an error"
+        );
+        return (None, session_id);
+    }
+
+    let response = match response.json::<RpcResponse>().await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, "failed to parse Transmission RPC response");
+            return (None, session_id);
+        }
+    };
+
+    (Some(response), session_id)
+}
+
 async fn parse_rpc_response(response: reqwest::Response) -> TransmissionStats {
     let response: RpcResponse = match response.json().await {
         Ok(response) => response,
@@ -311,6 +509,8 @@ mod tests {
                         rate_upload: 512,
                     },
                 ]),
+                rpc_port: None,
+                rpc_username: None,
             }),
         };
 
@@ -343,7 +543,11 @@ mod tests {
     fn parse_rpc_arguments_returns_default_without_torrents() {
         let response = RpcResponse {
             result: "success".to_owned(),
-            arguments: Some(RpcArguments { torrents: None }),
+            arguments: Some(RpcArguments {
+                torrents: None,
+                rpc_port: None,
+                rpc_username: None,
+            }),
         };
 
         let stats = parse_rpc_arguments(response);
