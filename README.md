@@ -2,7 +2,7 @@
 
 A small, COSMIC-native panel applet for controlling and monitoring [Transmission](https://transmissionbt.com/) instances.
 
-`cosmic-transmission` provides a native COSMIC interface for starting and stopping Transmission services, monitoring transfer activity, switching between configured Transmission instances, and opening the Transmission Web UI when more detailed torrent management is needed.
+`cosmic-transmission` provides a native COSMIC interface for controlling Transmission services, monitoring transfer activity, switching between configured Transmission instances, and opening the Transmission Web UI when more detailed torrent management is needed.
 
 ## Why?
 
@@ -20,7 +20,7 @@ The applet is intentionally not a replacement for the Transmission Web UI. It pr
 ## Features
 
 * COSMIC-native panel applet
-* Start and stop Transmission services directly from the panel
+* Start, stop, and restart Transmission services directly from the panel
 * Monitor Transmission daemon state
 * View current download and upload rates
 * View downloading, seeding, and active torrent counts
@@ -32,6 +32,7 @@ The applet is intentionally not a replacement for the Transmission Web UI. It pr
 * Per-connection polling intervals
 * Optional RPC username and password for remote connections
 * User or System systemd service scope
+* Integrated local Transmission service setup and configuration
 * Standalone COSMIC Settings application
 * Persistent configuration using COSMIC configuration
 * Password storage through the system credential backend
@@ -47,9 +48,11 @@ The packaged version also depends on the COSMIC applet infrastructure provided b
 
 ## Connections
 
-Version 0.4 introduces connection management.
+`cosmic-transmission` supports multiple Transmission connections.
 
-A connection represents a Transmission instance and contains its connection details, service configuration, and polling interval. One connection is selected as the active connection, and the panel applet operates on that connection.
+A connection represents a Transmission instance and contains its connection details, service configuration, and polling interval.
+
+The Settings application manages the available connections. The panel applet provides the runtime interface for selecting a connection, controlling its Transmission daemon when applicable, monitoring its state, and opening its Web UI.
 
 ### Local connections
 
@@ -59,8 +62,6 @@ Two local connections are provided automatically:
 * **Local System** — controls `transmission-daemon.service` as a system systemd service.
 
 These built-in connections cannot be deleted.
-
-The Local User connection is the default active connection.
 
 ### Remote connections
 
@@ -77,83 +78,62 @@ A remote connection can specify:
 
 Remote connections do not control a local systemd service. They communicate with the configured Transmission RPC endpoint.
 
-## Setting up a local Transmission service
+## Transmission service management
 
-For the **Local User** connection, `cosmic-transmission` expects a user-level systemd service named:
+For local connections, `cosmic-transmission` manages the standard:
 
-```text
+`````
 transmission-daemon.service
-```
+`````
 
-Distributions may provide a suitable user unit themselves. If not, create a user service unit appropriate for your Transmission installation under:
+service through systemd.
 
-```text
-~/.config/systemd/user/
-```
+The Settings application can detect the existing service and determine whether its configuration is already managed by `cosmic-transmission`.
 
-For example:
+If a local service is not configured for use, the Settings application provides a **Setup** action.
 
-```ini
-[Unit]
-Description=Transmission BitTorrent daemon
-After=network-online.target
+For the **Local User** connection, setup creates a user-level systemd configuration for the Transmission service.
 
-[Service]
-ExecStart=/usr/bin/transmission-daemon --foreground
-Restart=on-failure
-RestartSec=5
+For the **Local System** connection, setup creates the required system-level configuration and configures the service to run as the specified system user.
 
-[Install]
-WantedBy=default.target
-```
+Existing service configuration that was not created by `cosmic-transmission` is not overwritten automatically.
 
-Save it as:
+Once a local service is configured, the panel applet provides controls for:
 
-```text
-~/.config/systemd/user/transmission-daemon.service
-```
+* Starting Transmission
+* Stopping Transmission
+* Restarting Transmission
 
-The `ExecStart` path and arguments may differ depending on how Transmission is installed on your system.
+The applet also displays the current service state.
 
-After adding or changing the unit:
+## Transmission configuration
 
-```bash
-systemctl --user daemon-reload
-```
+The Settings application can configure the Transmission RPC settings used by a local service.
 
-Once the service unit is available, the **Local User** connection can start and stop Transmission directly from the COSMIC panel.
+The configurable values are:
 
-### System service
+* RPC port
+* RPC username
 
-The **Local System** connection is intended for a system-level `transmission-daemon.service`.
+When applying a configuration change, `cosmic-transmission` updates the Transmission daemon configuration and restarts the service when necessary.
 
-The service must be available to the system systemd manager and configured appropriately for the Transmission installation.
-
-### systemd lingering
-
-If Transmission should continue running without an active graphical login session, user systemd lingering may be enabled:
-
-```bash
-loginctl enable-linger
-```
-
-This is optional and is only necessary if you want the user-level daemon to continue running independently of your graphical login session.
+Remote connections use the RPC settings configured for the individual connection.
 
 ## Settings
 
-`cosmic-transmission-settings` is a standalone COSMIC Settings application for managing Transmission connections.
+`cosmic-transmission-settings` is a standalone COSMIC Settings application for managing Transmission connections and local service configuration.
 
 The Settings application provides:
 
-* Connection list and selection
+* Connection list
 * Adding remote connections
 * Removing remote connections
 * Reordering connections
-* Selecting the active connection
 * Transmission host and RPC port
 * RPC username and password
 * systemd service scope
 * Per-connection polling interval
+* Local Transmission service setup and configuration
 
 The polling interval can be set independently for each connection:
 
@@ -167,6 +147,8 @@ The default is 2 seconds.
 
 Local connections have fixed names and service scopes. Remote connections can be named and configured by the user.
 
+The Settings application manages the available connections and their configuration. Runtime connection selection is performed from the connection dropdown in the panel applet.
+
 Configuration is stored using COSMIC configuration and persists across application restarts.
 
 ## Web UI
@@ -175,11 +157,11 @@ Transmission includes its own Web UI.
 
 For a local Transmission instance using the default RPC port, the Web UI is normally available at:
 
-```text
+`````
 http://localhost:9091/
-```
+`````
 
-The applet's **Open Web UI** action opens the Web UI associated with the active connection using the system's default browser.
+The applet's **Open Web UI** action opens the Web UI associated with the currently selected connection using the system's default browser.
 
 The Web UI remains the primary interface for detailed torrent management. `cosmic-transmission` intentionally does not attempt to recreate the Transmission torrent-management interface.
 
@@ -187,32 +169,11 @@ The Web UI remains the primary interface for detailed torrent management. `cosmi
 
 ### Running Transmission as your normal user
 
-The **Local User** connection runs Transmission as your normal user account.
+The **Local User** connection runs Transmission with the permissions of the logged-in user.
 
-That is convenient, but it has an important security consequence:
+This means Transmission can access anything that the user can access. If Transmission is compromised, an attacker could potentially gain the same filesystem and operating-system access available to that user.
 
-> Transmission runs with the permissions of your normal user account.
-
-If Transmission or an exposed RPC/Web UI endpoint is compromised, an attacker potentially gains the same filesystem and operating-system permissions available to that user.
-
-This is different from running Transmission under a dedicated, restricted system account.
-
-For a personal desktop where Transmission only accesses directories you explicitly use for torrents, running it as your user can be a reasonable trade-off. However, understand the implications before exposing the daemon beyond your own machine.
-
-### Keep RPC local unless you need remote access
-
-For a local installation, keep Transmission's RPC interface bound to the local machine unless remote access is actually required.
-
-If remote access is required:
-
-* enable RPC authentication;
-* restrict which addresses may connect;
-* use an appropriate firewall;
-* avoid exposing the RPC port directly to the Internet.
-
-**Do not expose an unauthenticated Transmission RPC interface to an untrusted network.**
-
-For remote connections configured in `cosmic-transmission`, use the same precautions appropriate to the network between the desktop and the Transmission instance.
+The **Local System** connection can instead run the service as a specified system user, allowing Transmission to run with a more restricted set of permissions.
 
 ## Design goals
 
@@ -234,11 +195,11 @@ The project intentionally leaves detailed torrent management to Transmission rat
 
 An Arch Linux PKGBUILD is provided separately:
 
-```bash
+`````
 git clone https://github.com/Mel34/cosmic-transmission-pkgbuild.git
 cd cosmic-transmission-pkgbuild
 makepkg -si
-```
+`````
 
 The package installs both the COSMIC panel applet and the standalone Settings application.
 
@@ -248,16 +209,16 @@ After installation, add **Transmission** to the COSMIC panel through the panel's
 
 For development or testing, the binaries can be built directly with Cargo:
 
-```bash
+`````
 cargo build --release --locked
-```
+`````
 
 The resulting binaries are:
 
-```text
+`````
 target/release/cosmic-transmission
 target/release/cosmic-transmission-settings
-```
+`````
 
 The Arch package is recommended for normal installations because it installs the binaries and desktop integration in the appropriate system locations.
 
