@@ -1059,7 +1059,7 @@ fn add_connection_row(navigation_mode: ConnectionNavigationMode) -> Element<'sta
                     .symbolic(true)
                     .size(20)
                     .into(),
-                widget::text("Add a new connection").into(),
+                widget::text("Add new...").into(),
             ])
             .spacing(spacing.space_s)
             .align_y(Alignment::Center);
