@@ -3,3 +3,4 @@ TODO.md
 PKGBUILD
 pkg/
 *.pkg.tar.zst
+src/cosmic-transmission
