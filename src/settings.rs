@@ -713,14 +713,7 @@ impl SettingsModel {
         let spacing = theme::active().cosmic().spacing;
 
         let connection_section = widget::responsive(move |size| {
-            let connection_header = widget::row::with_children(vec![
-                widget::text::heading("Connections").into(),
-                widget::Space::new().width(Length::Fill).into(),
-                widget::button::standard("Add Connection")
-                    .on_press(Message::AddConnection)
-                    .into(),
-            ])
-            .align_y(Alignment::Center);
+            let connection_header = widget::text::heading("Connections");
 
             let connection = &self.selected_connection;
 
@@ -741,6 +734,8 @@ impl SettingsModel {
                 Message::ReorderConnections,
                 navigation_mode,
             );
+
+            let add_connection = add_connection_row(navigation_mode);
 
             let selected_is_local = connection.service_scope.is_some();
             let configuration_changed = !self.applied_configuration.matches(connection);
@@ -981,10 +976,18 @@ impl SettingsModel {
             widget::column::with_children(vec![
                 connection_header.into(),
                 widget::row::with_children(vec![
-                    widget::scrollable(connection_list)
-                        .width(navigation_width)
-                        .height(Length::Fill)
-                        .into(),
+                    widget::column::with_children(vec![
+                        widget::scrollable(connection_list)
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .into(),
+                        widget::divider::horizontal::default().into(),
+                        add_connection.into(),
+                    ])
+                    .width(navigation_width)
+                    .height(Length::Fill)
+                    .spacing(spacing.space_xxs)
+                    .into(),
                     widget::divider::vertical::default().into(),
                     widget::scrollable(details)
                         .width(Length::Fill)
@@ -1030,6 +1033,67 @@ impl SettingsModel {
     }
 }
 
+fn add_connection_row(navigation_mode: ConnectionNavigationMode) -> Element<'static, Message> {
+    let spacing = theme::active().cosmic().spacing;
+
+    let content: Element<'static, Message> = match navigation_mode {
+        ConnectionNavigationMode::Full => {
+            let content = widget::row::with_children(vec![
+                widget::Space::new().width(Length::Fixed(16.0)).into(),
+                widget::icon::from_name("list-add-symbolic")
+                    .symbolic(true)
+                    .size(20)
+                    .into(),
+                widget::text("Add a new connection").into(),
+            ])
+            .spacing(spacing.space_s)
+            .align_y(Alignment::Center);
+
+            content.into()
+        }
+
+        ConnectionNavigationMode::Compact => {
+            let content = widget::row::with_children(vec![
+                widget::icon::from_name("list-add-symbolic")
+                    .symbolic(true)
+                    .size(20)
+                    .into(),
+                widget::text("Add a new connection").into(),
+            ])
+            .spacing(spacing.space_s)
+            .align_y(Alignment::Center);
+
+            content.into()
+        }
+
+        ConnectionNavigationMode::Minimal => {
+            let icon = widget::tooltip(
+                widget::icon::from_name("list-add-symbolic")
+                    .symbolic(true)
+                    .size(20),
+                widget::text("Add a new connection"),
+                widget::tooltip::Position::Right,
+            );
+
+            widget::row::with_children(vec![
+                widget::Space::new().width(Length::Fill).into(),
+                icon.into(),
+                widget::Space::new().width(Length::Fill).into(),
+            ])
+            .align_y(Alignment::Center)
+            .into()
+        }
+    };
+
+    widget::mouse_area(
+        widget::container(content)
+            .padding([20, 8])
+            .width(Length::Fill)
+            .class(theme::Container::Primary),
+    )
+    .on_press(Message::AddConnection)
+    .into()
+}
 fn can_delete_connection(id: uuid::Uuid) -> bool {
     id != LOCAL_USER_ID && id != LOCAL_SYSTEM_ID
 }
