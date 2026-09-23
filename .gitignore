@@ -4,3 +4,5 @@ PKGBUILD
 pkg/
 *.pkg.tar.zst
 src/cosmic-transmission
+
+/cosmic-transmission

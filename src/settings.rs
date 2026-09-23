@@ -25,7 +25,6 @@ const DRAG_START_DISTANCE_SQUARED: f32 = 64.0;
 pub enum Message {
     SelectConnection(uuid::Uuid),
     PasswordLoaded(Option<String>),
-    UsernameLoaded(Option<String>),
     ServiceConfigurationLoaded(ServiceConfiguration),
     ServiceStateLoaded(ServiceState),
     ServiceAction(ServiceAction),
@@ -54,7 +53,6 @@ pub struct SettingsModel {
     connections_config: ConnectionsConfig,
     selected_connection: Connection,
     password: Option<String>,
-    local_username: Option<String>,
     service_configuration: Option<ServiceConfiguration>,
     service_state: Option<ServiceState>,
     service_action: Option<ServiceAction>,
@@ -119,16 +117,6 @@ impl Application for SettingsModel {
             },
         );
 
-        let username_task = if let Some(scope) = selected_connection.service_scope {
-            cosmic::Task::perform(ServiceController::new(scope).username(), |username| {
-                cosmic::Action::App(Message::UsernameLoaded(username))
-            })
-        } else {
-            cosmic::Task::perform(async { None }, |username| {
-                cosmic::Action::App(Message::UsernameLoaded(username))
-            })
-        };
-
         let service_configuration_task = if let Some(scope) = selected_connection.service_scope {
             cosmic::Task::perform(
                 ServiceController::new(scope).configuration(),
@@ -161,7 +149,6 @@ impl Application for SettingsModel {
                 connections_config,
                 selected_connection,
                 password: None,
-                local_username: None,
                 service_configuration: None,
                 service_state: None,
                 service_action: None,
@@ -169,7 +156,6 @@ impl Application for SettingsModel {
             },
             cosmic::Task::batch([
                 password_task,
-                username_task,
                 service_configuration_task,
                 service_state_task,
             ]),
@@ -195,7 +181,6 @@ impl Application for SettingsModel {
 
                 self.selected_connection = connection.clone();
                 self.password = None;
-                self.local_username = None;
                 self.service_configuration = None;
                 self.service_state = None;
 
@@ -205,16 +190,6 @@ impl Application for SettingsModel {
                             password.map(|password| password.expose_secret().to_string()),
                         ))
                     });
-
-                let username_task = if let Some(scope) = connection.service_scope {
-                    cosmic::Task::perform(ServiceController::new(scope).username(), |username| {
-                        cosmic::Action::App(Message::UsernameLoaded(username))
-                    })
-                } else {
-                    cosmic::Task::perform(async { None }, |username| {
-                        cosmic::Action::App(Message::UsernameLoaded(username))
-                    })
-                };
 
                 let service_configuration_task = if let Some(scope) = connection.service_scope {
                     cosmic::Task::perform(
@@ -244,7 +219,6 @@ impl Application for SettingsModel {
 
                 return cosmic::Task::batch([
                     password_task,
-                    username_task,
                     service_configuration_task,
                     service_state_task,
                 ]);
@@ -252,10 +226,6 @@ impl Application for SettingsModel {
 
             Message::PasswordLoaded(password) => {
                 self.password = password;
-            }
-
-            Message::UsernameLoaded(username) => {
-                self.local_username = username;
             }
 
             Message::ServiceConfigurationLoaded(configuration) => {
@@ -343,7 +313,6 @@ impl Application for SettingsModel {
                 self.connections_config.connections.push(connection.clone());
                 self.selected_connection = connection;
                 self.password = None;
-                self.local_username = None;
                 self.service_configuration = None;
                 self.service_state = None;
             }
@@ -377,7 +346,6 @@ impl Application for SettingsModel {
                             .expect("Local User connection must exist");
 
                         self.password = None;
-                        self.local_username = None;
                         self.service_configuration = self
                             .selected_connection
                             .service_scope
@@ -426,22 +394,45 @@ impl Application for SettingsModel {
             }
 
             Message::NameChanged(name) => {
-                if let Some(connection) = self.selected_connection_mut()
-                    && connection.service_scope.is_none()
+                let id = self.selected_connection.id;
+
+                self.selected_connection.name = name.clone();
+
+                if let Some(connection) = self
+                    .connections_config
+                    .connections
+                    .iter_mut()
+                    .find(|connection| connection.id == id)
                 {
                     connection.name = name;
                 }
             }
 
             Message::HostChanged(host) => {
-                if let Some(connection) = self.selected_connection_mut() {
+                let id = self.selected_connection.id;
+
+                self.selected_connection.host = host.clone();
+
+                if let Some(connection) = self
+                    .connections_config
+                    .connections
+                    .iter_mut()
+                    .find(|connection| connection.id == id)
+                {
                     connection.host = host;
                 }
             }
 
             Message::UsernameChanged(username) => {
-                if let Some(connection) = self.selected_connection_mut()
-                    && connection.service_scope.is_none()
+                let id = self.selected_connection.id;
+
+                self.selected_connection.username = username.clone();
+
+                if let Some(connection) = self
+                    .connections_config
+                    .connections
+                    .iter_mut()
+                    .find(|connection| connection.id == id)
                 {
                     connection.username = username;
                 }
@@ -474,11 +465,19 @@ impl Application for SettingsModel {
             }
 
             Message::RpcPortChanged(port) => {
-                if let Some(port) = parse_rpc_port(&port)
-                    && let Some(connection) = self.selected_connection_mut()
-                    && connection.service_scope.is_none()
-                {
-                    connection.rpc_port = port;
+                if let Some(port) = parse_rpc_port(&port) {
+                    let id = self.selected_connection.id;
+
+                    self.selected_connection.rpc_port = port;
+
+                    if let Some(connection) = self
+                        .connections_config
+                        .connections
+                        .iter_mut()
+                        .find(|connection| connection.id == id)
+                    {
+                        connection.rpc_port = port;
+                    }
                 }
             }
 
@@ -555,59 +554,32 @@ impl SettingsModel {
 
             let selected_is_local = connection.service_scope.is_some();
 
-            let name = if selected_is_local {
-                widget::settings::item(
-                    "Name",
-                    widget::text(connection.name.clone()).width(Length::Fixed(220.0)),
-                )
-            } else {
-                widget::settings::item(
-                    "Name",
-                    widget::text_input("", &connection.name)
-                        .on_input(Message::NameChanged)
-                        .width(Length::Fixed(220.0)),
-                )
-            };
+            let name = widget::settings::item(
+                "Name",
+                widget::text_input("", &connection.name)
+                    .on_input(Message::NameChanged)
+                    .width(Length::Fixed(220.0)),
+            );
 
             let host = widget::settings::item(
                 "Host",
-                if selected_is_local {
-                    widget::text_input("localhost", &connection.host).width(Length::Fixed(220.0))
-                } else {
-                    widget::text_input("localhost", &connection.host)
-                        .on_input(Message::HostChanged)
-                        .width(Length::Fixed(220.0))
-                },
+                widget::text_input("localhost", &connection.host)
+                    .on_input(Message::HostChanged)
+                    .width(Length::Fixed(220.0)),
             );
 
-            let username = if selected_is_local {
-                widget::settings::item(
-                    "Username",
-                    widget::text_input(
-                        "Username",
-                        self.local_username.as_deref().unwrap_or("Unknown"),
-                    )
+            let username = widget::settings::item(
+                "Username",
+                widget::text_input("Username", &connection.username)
+                    .on_input(Message::UsernameChanged)
                     .width(Length::Fixed(220.0)),
-                )
-            } else {
-                widget::settings::item(
-                    "Username",
-                    widget::text_input("Username", &connection.username)
-                        .on_input(Message::UsernameChanged)
-                        .width(Length::Fixed(220.0)),
-                )
-            };
+            );
 
             let rpc_port = widget::settings::item(
                 "RPC port",
-                if selected_is_local {
-                    widget::text_input("9091", connection.rpc_port.to_string())
-                        .width(Length::Fixed(220.0))
-                } else {
-                    widget::text_input("9091", connection.rpc_port.to_string())
-                        .on_input(Message::RpcPortChanged)
-                        .width(Length::Fixed(220.0))
-                },
+                widget::text_input("9091", connection.rpc_port.to_string())
+                    .on_input(Message::RpcPortChanged)
+                    .width(Length::Fixed(220.0)),
             );
 
             let poll_interval = widget::settings::item(

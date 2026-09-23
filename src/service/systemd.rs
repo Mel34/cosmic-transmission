@@ -165,6 +165,67 @@ impl SystemdServiceController {
         }
     }
 
+    pub async fn apply_configuration(
+        self,
+        rpc_port: u16,
+        rpc_username: &str,
+    ) -> Result<(), String> {
+        let connection = self.connection().await.map_err(|error| error.to_string())?;
+
+        let state = service_status(&connection).await;
+        let was_running = matches!(state, ServiceState::Running);
+
+        if was_running {
+            let state = service_action(&connection, ServiceAction::Stop).await;
+
+            if !matches!(state, ServiceState::Stopped) {
+                return Err(format!(
+                    "failed to stop Transmission before editing configuration: {state:?}"
+                ));
+            }
+        }
+
+        let result = match self.scope {
+            ServiceScope::User => {
+                let username = std::env::var("USER").ok();
+
+                let path = transmission_settings_path(username.as_deref())
+                    .ok_or_else(|| "could not determine Transmission settings path".to_string())?;
+
+                update_transmission_settings(&path, rpc_port, rpc_username)
+            }
+            ServiceScope::System => {
+                let username = service_username(&connection).await.ok_or_else(|| {
+                    "could not determine Transmission service username".to_string()
+                })?;
+
+                update_system_configuration(&connection, &username, rpc_port, rpc_username).await
+            }
+        };
+
+        if was_running {
+            let restart_state = service_action(&connection, ServiceAction::Start).await;
+
+            if let Err(error) = result {
+                if !matches!(restart_state, ServiceState::Running) {
+                    return Err(format!(
+                        "{error}; additionally failed to restart Transmission: {restart_state:?}"
+                    ));
+                }
+
+                return Err(error);
+            }
+
+            if !matches!(restart_state, ServiceState::Running) {
+                return Err(format!(
+                    "configuration was updated, but failed to restart Transmission: {restart_state:?}"
+                ));
+            }
+        }
+
+        result
+    }
+
     async fn connection(self) -> zbus::Result<zbus::Connection> {
         match self.scope {
             ServiceScope::User => zbus::Connection::session().await,
@@ -194,7 +255,9 @@ trait SystemdManager {
         name: &str,
         mode: &str,
     ) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+
     async fn reload(&self) -> zbus::Result<()>;
+
     async fn restart_unit(
         &self,
         name: &str,
@@ -329,6 +392,35 @@ async fn setup_system_configuration(
     Ok(())
 }
 
+async fn update_system_configuration(
+    connection: &zbus::Connection,
+    username: &str,
+    rpc_port: u16,
+    rpc_username: &str,
+) -> Result<(), String> {
+    let proxy = zbus::Proxy::new(
+        connection,
+        "io.github.cosmic.Transmission.Helper",
+        "/io/github/cosmic/Transmission/Helper",
+        "io.github.cosmic.Transmission.Helper1",
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+
+    let flags = zbus::proxy::MethodFlags::AllowInteractiveAuth.into();
+
+    let _: Option<()> = proxy
+        .call_with_flags(
+            "UpdateSystemSettings",
+            flags,
+            &(username, rpc_port, rpc_username),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
 async fn service_status(connection: &zbus::Connection) -> ServiceState {
     let Ok(manager) = SystemdManagerProxy::new(connection).await else {
         tracing::error!("failed to create systemd manager proxy");
@@ -456,6 +548,51 @@ async fn service_username(connection: &zbus::Connection) -> Option<String> {
     }
 }
 
+fn transmission_settings_path(username: Option<&str>) -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+
+    if username.is_some() {
+        tracing::warn!(
+            username = username.unwrap_or_default(),
+            "ignoring service username when resolving user Transmission settings"
+        );
+    }
+
+    Some(
+        home.join(".config")
+            .join("transmission-daemon")
+            .join("settings.json"),
+    )
+}
+
+fn update_transmission_settings(
+    path: &std::path::Path,
+    rpc_port: u16,
+    rpc_username: &str,
+) -> Result<(), String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+
+    let mut settings: serde_json::Value = serde_json::from_str(&contents)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+
+    let object = settings
+        .as_object_mut()
+        .ok_or_else(|| "Transmission settings.json does not contain a JSON object".to_string())?;
+
+    object.insert("rpc-port".to_string(), serde_json::Value::from(rpc_port));
+    object.insert(
+        "rpc-username".to_string(),
+        serde_json::Value::from(rpc_username),
+    );
+
+    let output = serde_json::to_string_pretty(&settings)
+        .map_err(|error| format!("failed to serialize Transmission settings: {error}"))?;
+
+    std::fs::write(path, format!("{output}\n"))
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
 fn service_state_from_active_state(state: &str) -> ServiceState {
     match state {
         "active" => ServiceState::Running,
@@ -552,6 +689,7 @@ mod tests {
 
         assert!(!is_managed_configuration(contents));
     }
+
     #[test]
     fn managed_user_configuration_path_uses_xdg_config_home() {
         let path = managed_configuration_path(ServiceScope::User);
@@ -570,6 +708,7 @@ mod tests {
             ))
         );
     }
+
     #[test]
     fn managed_system_configuration_contains_username() {
         let contents = managed_configuration(ServiceScope::System, Some("anon"));
@@ -585,5 +724,66 @@ mod tests {
         let contents = managed_configuration(ServiceScope::User, Some("anon"));
 
         assert_eq!(contents, "[Service]\n# Managed by cosmic-transmission\n");
+    }
+
+    #[test]
+    fn transmission_settings_are_updated() {
+        let path = std::env::temp_dir().join(format!(
+            "cosmic-transmission-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+
+        let input = r#"{
+  "rpc-enabled": true,
+  "rpc-port": 9091,
+  "rpc-username": "",
+  "download-dir": "/home/anon/Downloads"
+}"#;
+
+        std::fs::write(&path, input).unwrap();
+
+        update_transmission_settings(&path, 12345, "test-user").unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&contents).unwrap();
+
+        assert_eq!(settings["rpc-port"], 12345);
+        assert_eq!(settings["rpc-username"], "test-user");
+        assert_eq!(settings["rpc-enabled"], true);
+        assert_eq!(settings["download-dir"], "/home/anon/Downloads");
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transmission_settings_reject_invalid_json() {
+        let path = std::env::temp_dir().join(format!(
+            "cosmic-transmission-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+
+        std::fs::write(&path, "{ invalid json").unwrap();
+
+        let result = update_transmission_settings(&path, 12345, "test-user");
+
+        assert!(result.is_err());
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transmission_settings_reject_non_object_json() {
+        let path = std::env::temp_dir().join(format!(
+            "cosmic-transmission-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+
+        std::fs::write(&path, "[]").unwrap();
+
+        let result = update_transmission_settings(&path, 12345, "test-user");
+
+        assert!(result.is_err());
+
+        std::fs::remove_file(path).unwrap();
     }
 }
