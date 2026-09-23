@@ -103,7 +103,7 @@ impl Application for SettingsModel {
     type Flags = ();
     type Message = Message;
 
-    const APP_ID: &'static str = "io.github.cosmic.Transmission.Settings";
+    const APP_ID: &'static str = "io.github.cosmic.Transmission";
 
     fn core(&self) -> &cosmic::Core {
         &self.core

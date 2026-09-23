@@ -564,8 +564,8 @@ impl AppModel {
     }
 
     fn panel_icon(&self) -> Element<'_, Message> {
-        let transmission = widget::icon::from_name("transmission")
-            .symbolic(false)
+        let transmission = widget::icon::from_name("cosmic-transmission")
+            .symbolic(true)
             .size(16);
 
         let (status_svg, status_color) = match self.state {
@@ -581,7 +581,7 @@ impl AppModel {
         let status_handle = widget::icon::from_svg_bytes(status_svg).symbolic(true);
 
         let status = widget::icon(status_handle)
-            .size(10)
+            .size(6)
             .class(theme::Svg::custom(move |_| {
                 cosmic::iced::widget::svg::Style {
                     color: Some(status_color.into()),

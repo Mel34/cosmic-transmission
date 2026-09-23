@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  width="16"
+  height="16"
+  viewBox="0 0 16 16"
+  fill="none"
+  xmlns="http://www.w3.org/2000/svg"
+>
+  <!-- triangular support -->
+  <path
+    d="M7 9.2 L3.4 14.2 L10.6 14.2 Z"
+    fill="currentColor"
+  />
+
+  <!-- enlarged dish assembly -->
+  <g transform="rotate(25 7 9.2)">
+
+    <!-- dish -->
+    <ellipse
+      cx="7"
+      cy="9.2"
+      rx="6.1"
+      ry="2.9"
+      fill="currentColor"
+    />
+
+    <!-- feed support struts -->
+    <line
+      x1="2"
+      y1="9.2"
+      x2="7"
+      y2="2.5"
+      stroke="currentColor"
+      stroke-width="0.45"
+      stroke-linecap="round"
+    />
+    <line
+      x1="12"
+      y1="9.2"
+      x2="7"
+      y2="2.5"
+      stroke="currentColor"
+      stroke-width="0.45"
+      stroke-linecap="round"
+    />
+
+    <!-- feed arm -->
+    <line
+      x1="7"
+      y1="9.2"
+      x2="7"
+      y2="2.5"
+      stroke="currentColor"
+      stroke-width="1.1"
+      stroke-linecap="round"
+    />
+
+    <!-- feed head -->
+    <circle
+      cx="7"
+      cy="2.5"
+      r="1.05"
+      fill="currentColor"
+    />
+  </g>
+</svg>

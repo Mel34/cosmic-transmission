@@ -1,0 +1,228 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  COSMIC Transmission application icon
+  Based on the 16×16 symbolic satellite-dish geometry developed for
+  the COSMIC Transmission panel icon.
+-->
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="128"
+  height="128"
+  viewBox="0 0 128 128"
+  fill="none"
+>
+  <defs>
+    <!-- Metallic dish face with concentrated shine near feed arm -->
+    <radialGradient
+      id="dish-face-gradient"
+      cx="64"
+      cy="43"
+      r="48"
+      gradientUnits="userSpaceOnUse"
+    >
+      <stop offset="0" stop-color="#D4D8DD" />
+      <stop offset="0.16" stop-color="#9FA5AD" />
+      <stop offset="0.42" stop-color="#555B64" />
+      <stop offset="0.72" stop-color="#30353D" />
+      <stop offset="1" stop-color="#1C2025" />
+    </radialGradient>
+
+    <!-- Feed arm: dish color → feed cyan -->
+    <linearGradient
+      id="feed-arm-gradient"
+      x1="64"
+      y1="70"
+      x2="64"
+      y2="25"
+      gradientUnits="userSpaceOnUse"
+    >
+      <stop offset="0" stop-color="#30343B" />
+      <stop offset="1" stop-color="#23C7D9" />
+    </linearGradient>
+
+    <!-- Base: near-black → dark gold → yellow -->
+    <linearGradient
+      id="base-gradient"
+      x1="52"
+      y1="73"
+      x2="52"
+      y2="116"
+      gradientUnits="userSpaceOnUse"
+    >
+      <stop offset="0" stop-color="#050608" />
+      <stop offset="0.30" stop-color="#25201A" />
+      <stop offset="0.60" stop-color="#9A6B20" />
+      <stop offset="1" stop-color="#E6B85C" />
+    </linearGradient>
+  </defs>
+
+  <!-- asymmetric left-side base surface -->
+  <path
+    d="M52 73
+       L38 116
+       L52 116
+       Z"
+    fill="url(#base-gradient)"
+  />
+
+  <!-- remaining right-side base surface -->
+  <path
+    d="M52 73
+       L52 116
+       L93 116
+       Z"
+    fill="url(#base-gradient)"
+  />
+
+  <!-- bold left outer structural edge -->
+  <line
+    x1="52"
+    y1="73"
+    x2="38"
+    y2="116"
+    stroke="#30343B"
+    stroke-width="7"
+    stroke-linecap="round"
+  />
+
+  <!-- bottom base edge -->
+  <line
+    x1="38"
+    y1="116"
+    x2="93"
+    y2="116"
+    stroke="#30343B"
+    stroke-width="7"
+    stroke-linecap="round"
+  />
+
+  <!-- first internal structural line -->
+  <line
+    x1="52"
+    y1="73"
+    x2="56.33"
+    y2="116"
+    stroke="#30343B"
+    stroke-width="3"
+    stroke-linecap="round"
+  />
+
+  <!-- second internal structural line -->
+  <line
+    x1="52"
+    y1="73"
+    x2="74.67"
+    y2="116"
+    stroke="#30343B"
+    stroke-width="3"
+    stroke-linecap="round"
+  />
+
+  <!-- right outer structural edge -->
+  <line
+    x1="52"
+    y1="73"
+    x2="93"
+    y2="116"
+    stroke="#30343B"
+    stroke-width="7"
+    stroke-linecap="round"
+  />
+
+  <!-- dish assembly -->
+  <g transform="rotate(25 64 70)">
+
+    <!-- dish body -->
+    <path
+      d="M8 70
+         C10 48 34 29 64 29
+         C94 29 118 48 120 70
+         C99 80 78 85 64 85
+         C50 85 29 80 8 70
+         Z"
+      fill="#30343B"
+    />
+
+    <!-- metallic inner dish face -->
+    <path
+      d="M15 68
+         C23 52 42 40 64 40
+         C86 40 105 52 113 68
+         C94 74 77 77 64 77
+         C51 77 34 74 15 68
+         Z"
+      fill="url(#dish-face-gradient)"
+    />
+
+    <!-- subtle dish lower rim -->
+    <path
+      d="M9 70
+         C31 81 51 86 64 86
+         C77 86 97 81 119 70"
+      stroke="#24282E"
+      stroke-width="5"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+
+    <!-- left feed support arm -->
+    <line
+      x1="13"
+      y1="69"
+      x2="64"
+      y2="25"
+      stroke="#E6B85C"
+      stroke-width="3"
+      stroke-linecap="round"
+    />
+
+    <!-- middle-right feed support arm -->
+    <line
+      x1="89"
+      y1="69"
+      x2="64"
+      y2="25"
+      stroke="#E6B85C"
+      stroke-width="3"
+      stroke-linecap="round"
+    />
+
+    <!-- outer-right feed support arm -->
+    <line
+      x1="104"
+      y1="48"
+      x2="64"
+      y2="25"
+      stroke="#E6B85C"
+      stroke-width="3"
+      stroke-linecap="round"
+    />
+
+    <!-- central feed arm -->
+    <line
+      x1="64"
+      y1="70"
+      x2="64"
+      y2="25"
+      stroke="url(#feed-arm-gradient)"
+      stroke-width="8"
+      stroke-linecap="round"
+    />
+
+    <!-- feed head -->
+    <circle
+      cx="64"
+      cy="25"
+      r="11"
+      fill="#23C7D9"
+    />
+
+    <!-- feed head highlight -->
+    <circle
+      cx="61"
+      cy="22"
+      r="3.5"
+      fill="#6DE5F0"
+    />
+  </g>
+</svg>
