@@ -881,7 +881,7 @@ impl SettingsModel {
                     ),
                     Some(ServiceConfiguration::Configured { .. }) => {
                         let service_buttons = widget::row::with_children(vec![
-                            widget::button::standard("Start")
+                            widget::button::suggested("Start")
                                 .on_press_maybe(
                                     (!service_checking
                                         && !self.configuration_applying
@@ -889,7 +889,7 @@ impl SettingsModel {
                                         .then_some(Message::ServiceAction(ServiceAction::Start)),
                                 )
                                 .into(),
-                            widget::button::standard("Stop")
+                            widget::button::destructive("Stop")
                                 .on_press_maybe(
                                     (!service_checking
                                         && !self.configuration_applying
