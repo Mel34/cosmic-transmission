@@ -90,6 +90,7 @@ pub struct SettingsModel {
     selected_connection: Connection,
     applied_configuration: AppliedConfiguration,
     password: Option<String>,
+    saved_password: Option<String>,
     service_configuration: Option<ServiceConfiguration>,
     service_state: Option<ServiceState>,
     service_action: Option<ServiceAction>,
@@ -190,6 +191,7 @@ impl Application for SettingsModel {
                 selected_connection,
                 applied_configuration,
                 password: None,
+                saved_password: None,
                 service_configuration: None,
                 service_state: None,
                 service_action: None,
@@ -224,6 +226,7 @@ impl Application for SettingsModel {
                 self.selected_connection = connection.clone();
                 self.applied_configuration = AppliedConfiguration::from_connection(&connection);
                 self.password = None;
+                self.saved_password = None;
                 self.service_configuration = None;
                 self.service_state = None;
                 self.service_action = None;
@@ -253,10 +256,9 @@ impl Application for SettingsModel {
                 };
 
                 let service_state_task = if let Some(scope) = connection.service_scope {
-                    cosmic::Task::perform(
-                        ServiceController::new(scope).status(),
-                        |state| cosmic::Action::App(Message::ServiceStateLoaded(state)),
-                    )
+                    cosmic::Task::perform(ServiceController::new(scope).status(), |state| {
+                        cosmic::Action::App(Message::ServiceStateLoaded(state))
+                    })
                 } else {
                     cosmic::Task::perform(async { ServiceState::Stopped }, |state| {
                         cosmic::Action::App(Message::ServiceStateLoaded(state))
@@ -271,7 +273,8 @@ impl Application for SettingsModel {
             }
 
             Message::PasswordLoaded(password) => {
-                self.password = password;
+                self.password = password.clone();
+                self.saved_password = password;
             }
 
             Message::ServiceConfigurationLoaded(configuration) => {
@@ -346,7 +349,9 @@ impl Application for SettingsModel {
             }
 
             Message::ApplyConfiguration => {
-                if self.applied_configuration.matches(&self.selected_connection)
+                if self
+                    .applied_configuration
+                    .matches(&self.selected_connection)
                     || self.configuration_applying
                 {
                     return cosmic::Task::none();
@@ -495,6 +500,7 @@ impl Application for SettingsModel {
                 self.selected_connection = connection.clone();
                 self.applied_configuration = AppliedConfiguration::from_connection(&connection);
                 self.password = None;
+                self.saved_password = None;
                 self.service_configuration = None;
                 self.service_state = None;
                 self.service_action = None;
@@ -532,6 +538,7 @@ impl Application for SettingsModel {
                         self.applied_configuration =
                             AppliedConfiguration::from_connection(&self.selected_connection);
                         self.password = None;
+                        self.saved_password = None;
                         self.service_configuration = self
                             .selected_connection
                             .service_scope
@@ -630,17 +637,17 @@ impl Application for SettingsModel {
 
                 if let Some(password) = self.password.clone()
                     && !password.is_empty()
+                    && self.saved_password.as_deref() != Some(password.as_str())
                 {
                     return cosmic::Task::perform(
-                        credentials::set_password(id, SecretString::from(password)),
-                        |_| cosmic::Action::App(Message::PasswordLoaded(None)),
+                        credentials::set_password(id, SecretString::from(password.clone())),
+                        move |_| cosmic::Action::App(Message::PasswordLoaded(Some(password))),
                     );
                 }
             }
 
             Message::ClearPassword => {
                 let id = self.selected_connection.id;
-                self.password = None;
 
                 return cosmic::Task::perform(credentials::delete_password(id), |_| {
                     cosmic::Action::App(Message::PasswordLoaded(None))
@@ -813,11 +820,9 @@ impl SettingsModel {
             );
 
             let apply_button = if configuration_changed {
-                widget::button::suggested("Apply")
-                    .on_press_maybe(
-                        (!self.configuration_applying)
-                            .then_some(Message::ApplyConfiguration),
-                    )
+                widget::button::suggested("Apply").on_press_maybe(
+                    (!self.configuration_applying).then_some(Message::ApplyConfiguration),
+                )
             } else {
                 widget::button::standard("Apply").on_press_maybe(None)
             };
@@ -931,6 +936,23 @@ impl SettingsModel {
             } else {
                 let _ = rpc_configuration_changed;
 
+                let password_changed = self
+                    .password
+                    .as_deref()
+                    .filter(|password| !password.is_empty())
+                    != self.saved_password.as_deref();
+
+                let password_saved = self.saved_password.is_some();
+
+                let save_password = if password_changed {
+                    widget::button::suggested("Save password").on_press(Message::SavePassword)
+                } else {
+                    widget::button::standard("Save password").on_press_maybe(None)
+                };
+
+                let clear_password = widget::button::standard("Clear password")
+                    .on_press_maybe(password_saved.then_some(Message::ClearPassword));
+
                 widget::column::with_children(vec![
                     name.into(),
                     host.into(),
@@ -940,12 +962,8 @@ impl SettingsModel {
                     password.into(),
                     widget::row::with_children(vec![
                         widget::Space::new().width(Length::Fill).into(),
-                        widget::button::standard("Save password")
-                            .on_press(Message::SavePassword)
-                            .into(),
-                        widget::button::standard("Clear password")
-                            .on_press(Message::ClearPassword)
-                            .into(),
+                        save_password.into(),
+                        clear_password.into(),
                     ])
                     .spacing(spacing.space_xxs)
                     .into(),
